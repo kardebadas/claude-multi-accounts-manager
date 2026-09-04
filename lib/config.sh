@@ -24,15 +24,26 @@
 #       shared_dir        <root>/shared
 #       trash_dir         <root>/.trash
 #       account_dir       <root>/<name>
+#       shared_items         one "<name>|<kind>|<origin>" row per line
+#       shared_item_names    the seven item names, one per line, in seed order
+#       shared_item_kind     `file` or `dir`, for one item
+#       shared_item_origin   `copy`/`create`/`link`/`rewrite`, for one item
+#       account_link_target  `../shared/<name>`, the account-side link target
 #   Callers MUST capture them — `root="$(multi_root)"`. Nothing in bin/ or
 #   lib/ may call one bare, or the value lands on claude's stdout.
+#
+#   The four per-item accessors refuse an unknown or empty name by returning 1
+#   and printing NOTHING on either channel — the same rule account_dir follows.
+#   The caller decides what to say about it; a getter that narrated would put
+#   its sentence on claude's stdout.
 #
 #   DIAGNOSTIC PREDICATES — return 0/1 and write only to stderr, never stdout.
 #       validate_root_path   one error line to stderr on refusal
 #       is_reserved_name     silent; no output on either channel
 #
-# So: a stdout audit must leave the four producers alone, and hold the two
-# predicates to zero bytes of stdout.
+# So: a stdout audit must leave the nine producers alone, and hold the two
+# predicates to zero bytes of stdout. `_shared_item_row` is internal and is a
+# producer too, for the same reason.
 
 # ── reserved names ───────────────────────────────────────────────────────────
 # Names that can never be an account, because the layout already uses them:
@@ -155,4 +166,116 @@ validate_root_path() {
     return 1
   fi
   return 0
+}
+
+# ── the shared-item table ─────────────────────────────────────────────────────
+# The single source of truth for what lives in shared/ and is symlinked into
+# every account. Phase 2 iterates it to create and verify the account-side
+# links; Phase 3 iterates it to seed shared/ from the read-only main folder.
+#
+# Row format: "<name>|<kind>|<origin>"
+#   kind    file | dir            what shared/<name> must be
+#   origin  how shared/<name> comes into being on first run:
+#           copy     recursive copy from the main folder
+#           create   created empty (the source does not exist: ~/.claude/commands)
+#           link     shared/<name> is itself an absolute symlink to the
+#                    resolved target (skills -> the real shared skills dir,
+#                    which Codex uses too; copying the link would produce a
+#                    dangling one and silently lose every skill)
+#           rewrite  copied with its content edited (settings.json's hook
+#                    command must point at shared/hooks, never back into the
+#                    read-only main folder)
+#
+# The order is the seed order, and it is part of the contract: Phase 3 seeds in
+# it and Phase 2 links in it.
+#
+# Every account-side link is relative ("../shared/<name>"), so the whole root
+# can be moved without rewriting a single link. Only shared/skills is absolute.
+#
+# Deliberately absent — these are NOT account-side links and must never be
+# added here: plugin-cache (the target of CLAUDE_CODE_PLUGIN_CACHE_DIR, not a
+# link), project-memory (per-slug links, one per project), plugins (its
+# installLocation is checked lexically against the account's own config dir, so
+# it cannot be shared), security/ (per-session state and pinned venv shebangs).
+#
+# NEVER hand-split a row. Consumers use shared_item_names, shared_item_kind,
+# shared_item_origin and account_link_target; a consumer that iterated the raw
+# rows as if they were names would create a link called
+# "CLAUDE.md|file|copy" — a real defect caught in review before Phase 2 was
+# implemented. shared_items exists for reporting the table, not for parsing it.
+#
+# A plain assignment, not `readonly` and not `+=`: re-sourcing must replace the
+# table rather than append to it or abort. Fourteen rows would mean every link
+# is created twice.
+CLAUDE_MULTI_SHARED_ITEMS=(
+  "CLAUDE.md|file|copy"
+  "skills|dir|link"
+  "agents|dir|copy"
+  "hooks|dir|copy"
+  "commands|dir|create"
+  "agent-memory|dir|copy"
+  "settings.json|file|rewrite"
+)
+
+# shared_items -> every raw row, one per line.   DATA PRODUCER
+shared_items() {
+  local row
+  for row in "${CLAUDE_MULTI_SHARED_ITEMS[@]}"; do
+    printf '%s\n' "$row"
+  done
+}
+
+# shared_item_names -> the names, one per line, in seed order.   DATA PRODUCER
+# This is what Phase 2 iterates; pair it with account_link_target.
+shared_item_names() {
+  local row
+  for row in "${CLAUDE_MULTI_SHARED_ITEMS[@]}"; do
+    printf '%s\n' "${row%%|*}"
+  done
+}
+
+# _shared_item_row <name> -> the raw row for <name>, or 1 and nothing.
+# Internal. Matches the name literally, so a near miss is a miss. An empty name
+# is refused up front: "${row%%|*}" can never be empty, but relying on that
+# would make the guard an accident of the table's content.
+_shared_item_row() {
+  local want="${1-}" row
+  if [[ -z "$want" ]]; then
+    return 1
+  fi
+  for row in "${CLAUDE_MULTI_SHARED_ITEMS[@]}"; do
+    if [[ "${row%%|*}" == "$want" ]]; then
+      printf '%s\n' "$row"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# shared_item_kind <name> -> file | dir     DATA PRODUCER; 1 for an unknown name
+shared_item_kind() {
+  local row=""
+  row="$(_shared_item_row "${1-}")" || return 1
+  row="${row#*|}"
+  printf '%s\n' "${row%%|*}"
+}
+
+# shared_item_origin <name> -> copy | create | link | rewrite
+# DATA PRODUCER; returns 1 for an unknown name.
+shared_item_origin() {
+  local row=""
+  row="$(_shared_item_row "${1-}")" || return 1
+  printf '%s\n' "${row##*|}"
+}
+
+# account_link_target <name> -> the relative target of <account>/<name>.
+# DATA PRODUCER; returns 1 for an unknown name.
+#
+# Independent of the managed root by design: the value is relative, so moving
+# the root leaves every link intact. The membership check is what makes an
+# unknown name an error instead of a plausible-looking "../shared/typo".
+account_link_target() {
+  local name="${1-}"
+  _shared_item_row "$name" >/dev/null || return 1
+  printf '%s\n' "../shared/$name"
 }
