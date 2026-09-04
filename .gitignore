@@ -1,0 +1,56 @@
+# This repository is PUBLIC. This file is deny-by-default on purpose.
+#
+# Everything is ignored unless a rule below explicitly allows it. A blocklist
+# fails open: the day a new kind of state file appears, it gets committed
+# because nobody thought to deny it. An allowlist fails safe.
+#
+# To track a genuinely new path, add an explicit `!` rule for it.
+
+# ── deny everything ───────────────────────────────────────────────────────────
+/*
+
+# ── allow the tooling ─────────────────────────────────────────────────────────
+!/.gitignore
+!/CLAUDE.md
+!/README.md
+!/LICENSE
+!/install.sh
+!/bin/
+!/lib/
+!/tests/
+!/scripts/
+
+# ── landmines inside the allowed directories ──────────────────────────────────
+# Credentials and account state, in case one is ever copied in for debugging.
+**/.credentials.json
+**/*.credentials.json
+**/.claude.json
+**/.env
+**/.env.*
+
+# Account backups produced by the delete path, and any archive.
+**/*.tgz
+**/*.tar.gz
+**/*.tar
+**/*.zip
+
+# Test scratch: fake HOMEs and fake multi roots must never be committed.
+/tests/tmp/
+/tests/.tmp/
+**/tmp/
+**/*.tmp
+
+# Captured output and logs can contain absolute home paths and account names.
+**/*.log
+**/*.out
+
+# Never track a real config tree that wandered into the repo.
+**/.claude/
+**/.claude-multi/
+**/shared/
+**/.trash/
+
+# OS and editor noise.
+**/.DS_Store
+**/*.swp
+**/*~
