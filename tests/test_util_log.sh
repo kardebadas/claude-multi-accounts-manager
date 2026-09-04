@@ -179,6 +179,7 @@ test_require_bash4_diagnostic_names_bash_4() {
 test_require_bash4_stdout_is_byte_empty() {
   assert_stdout_empty_bytes require_bash4 3
   assert_stdout_empty_bytes require_bash4 5
+  assert_stdout_empty_bytes require_bash4 99999999999999999999
   assert_no_stdout require_bash4 3
 }
 
@@ -195,6 +196,60 @@ test_require_bash4_refuses_a_non_numeric_major() {
   assert_contains "$out" "claude-multi: error:"
   assert_eq "" "$(printf '%s\n' "$out" | grep -F 'unbound variable' || true)" \
     "a non-numeric major must not surface as a raw set -u abort"
+}
+
+# require_bash4 returns rather than exits, so it can be called in-process. The
+# malformed-input table below runs it in a child under the executables'
+# contract (`set -euo pipefail`) instead, because that is where a fail-open bug
+# is visible: the child prints ACCEPTED after the call, so "it accepted" shows
+# up in the captured stream rather than having to be inferred, and a raw `set
+# -u` abort or a `[` parse error lands there too instead of killing this file.
+_require_bash4_child() {
+  bash -c 'set -euo pipefail; source "$1/lib/util.sh"; require_bash4 "$2"; printf "ACCEPTED\n"' \
+    _ "$REPO_ROOT" "${1-}" 2>&1
+}
+
+test_require_bash4_refuses_every_malformed_major() {
+  # A version check that ACCEPTS on malformed input is worse than no check at
+  # all, so every one of these must REFUSE. Each fell through to `return 0` in
+  # some earlier form of the guard:
+  #   ""                     `${1:-...}` treats an explicit empty string as
+  #                          unset and silently defaults to this shell's major.
+  #   abc / BASH_VERSINFO    `(( ))` dereferences a variable NAME and accepts.
+  #   99999999999999999999   all digits, so a length-unbounded digit guard
+  #                          passed it; `[ -lt ]` could then not parse it, the
+  #                          `if` was simply false, and the function accepted
+  #                          after leaking a raw `[: integer expression
+  #                          expected` message under lib/util.sh's own name.
+  local arg out code leak
+  for arg in "" "abc" "BASH_VERSINFO" "99999999999999999999" "4.2" " 4" "-1"; do
+    set +e
+    out="$(_require_bash4_child "$arg")"
+    code=$?
+    set -e
+    assert_eq "1" "$code" "require_bash4 [$arg] must refuse, not accept"
+    assert_contains "$out" "bash 4 or newer is required" \
+      "require_bash4 [$arg] must refuse with the tool's own diagnostic"
+    leak="$(printf '%s\n' "$out" \
+      | grep -nE 'ACCEPTED|integer expression expected|unbound variable' || true)"
+    assert_eq "" "$leak" \
+      "require_bash4 [$arg] must refuse without leaking a raw bash message"
+  done
+}
+
+test_require_bash4_accepts_a_normal_major() {
+  # The accepting half of the same table. It pins the length bound in the digit
+  # guard: the bound may not be tightened until it starts rejecting versions a
+  # real bash reports.
+  local arg out code
+  for arg in "4" "5" "10" "007" "99"; do
+    set +e
+    out="$(_require_bash4_child "$arg")"
+    code=$?
+    set -e
+    assert_eq "0" "$code" "require_bash4 [$arg] must accept"
+    assert_eq "ACCEPTED" "$out" "require_bash4 [$arg] must accept silently"
+  done
 }
 
 # ── require_bash4 must itself run on the bash it rejects ─────────────────────
@@ -282,15 +337,80 @@ test_util_sh_is_a_sourced_library() {
     "a sourced library must not set -e"
 }
 
+# Extracts the die-vs-warn contract banner from lib/util.sh by the banner's own
+# delimiter line, stopping at the first line that is not a comment. Comment
+# markers are stripped and whitespace collapsed, so an assertion below can name
+# a whole sentence without caring where the prose happens to wrap.
+#
+# Deliberately NOT `sed -n '1,40p'`. A fixed line window plus a few common
+# keywords is satisfiable by accident: delete the banner and the per-function
+# one-liners ("...log, warn, die...", "returns non-zero after warning",
+# "unrecoverable. stderr, then exit 1") shift up into the window and supply
+# every keyword between them, so the suite stays green with the contract gone.
+# Extracting by delimiter makes a deleted banner an empty string instead.
+_util_sh_contract_banner() {
+  awk '
+    /die vs\. warn:/    { inb = 1 }
+    inb && $0 !~ /^#/  { exit }
+    inb                { sub(/^#[ ]?/, ""); print }
+  ' "$UTIL_SH" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' '
+}
+
 test_util_sh_documents_the_die_versus_warn_contract() {
   # Later phases depend on this distinction being stated, not inferred: Phase 4
   # originally called die on a recoverable condition, which would have aborted
-  # an add_account that should merely warn.
-  local header
-  header="$(sed -n '1,40p' "$UTIL_SH" | tr '[:upper:]' '[:lower:]')"
-  assert_contains "$header" "unrecoverable" "the header must say die is for unrecoverable conditions"
-  assert_contains "$header" "warn" "the header must name warn as the alternative"
-  assert_contains "$header" "non-zero" "the header must say the caller returns non-zero instead"
+  # an add_account that should merely warn. The banner is what stops that
+  # recurring, so deleting or gutting it must turn this test red.
+  local banner
+  banner="$(_util_sh_contract_banner)"
+
+  if [[ -z "$banner" ]]; then
+    printf '  FAIL: lib/util.sh has no "die vs. warn" contract banner\n' >&2
+    return 1
+  fi
+
+  # Each phrase is a whole clause that appears nowhere else in the file, so it
+  # cannot be reconstructed from the surrounding one-line function comments.
+  assert_contains "$banner" 'die vs. warn: the contract later phases must honour' \
+    "the banner must keep its heading"
+  assert_contains "$banner" '`die` is for unrecoverable conditions only' \
+    "the banner must say die is for unrecoverable conditions only"
+  assert_contains "$banner" 'it calls `warn` and returns non-zero, leaving the decision to the caller' \
+    "the banner must say a continuing caller warns and returns non-zero itself"
+  assert_contains "$banner" '`die` is also wrong inside a `$( )` getter' \
+    "the banner must keep the getter caveat"
+}
+
+test_the_contract_banner_phrases_are_unique_to_the_banner() {
+  # The guard above is only meaningful if its phrases live in the banner alone.
+  # If one were duplicated in a per-function comment, deleting the banner would
+  # once again leave the suite green.
+  local phrase hits whole banner
+  # The whole file, normalised exactly the way the banner is, so a phrase that
+  # wraps across two comment lines is still one string to count.
+  whole="$(sed -e 's/^#[ ]\{0,1\}//' "$UTIL_SH" \
+    | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ')"
+  banner="$(_util_sh_contract_banner)"
+  while IFS= read -r phrase; do
+    [[ -n "$phrase" ]] || continue
+    # `|| true` inside the braces, not after the pipeline: this file runs under
+    # pipefail, so a zero-match grep would otherwise fail the assignment and
+    # `set -e` would abort the test with no diagnostic — exactly the failure
+    # this test exists to make visible.
+    hits="$( { printf '%s' "$whole" | grep -o -F -- "$phrase" || true; } \
+      | wc -l | tr -d '[:space:]')"
+    assert_eq "1" "$hits" "[$phrase] must appear exactly once in lib/util.sh"
+    case "$banner" in
+      *"$phrase"*) ;;
+      *) printf '  FAIL: [%s] is not inside the contract banner\n' "$phrase" >&2
+         return 1 ;;
+    esac
+  done <<'PHRASES'
+die vs. warn: the contract later phases must honour
+`die` is for unrecoverable conditions only
+it calls `warn` and returns non-zero, leaving the decision to the caller
+`die` is also wrong inside a `$( )` getter
+PHRASES
 }
 
 test_util_sh_writes_nothing_to_stdout_when_sourced() {

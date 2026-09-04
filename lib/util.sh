@@ -70,8 +70,16 @@ require_bash4() {
     found="${BASH_VERSION:-unknown}"
   fi
 
+  # Reject before comparing, and reject on EVERY malformed shape: a version
+  # check that ACCEPTS on bad input is worse than no check at all. Empty (an
+  # explicit "" must not be defaulted away to this shell's own major), any
+  # non-digit (a variable NAME included — `(( ))` would dereference it and
+  # accept), and four or more digits, which is past what `[ -lt ]` will parse:
+  # an unparsable operand makes `[` print a raw "integer expression expected"
+  # and leaves the `if` merely false, so the function would fall through and
+  # accept. Refusing fails closed, and no real bash reports a four-digit major.
   case "$major" in
-    '' | *[!0-9]*)
+    '' | *[!0-9]* | ????*)
       printf '%s: error: bash 4 or newer is required (unreadable major version [%s])\n' \
         "$CLAUDE_MULTI_PROG" "$major" >&2
       return 1
