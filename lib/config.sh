@@ -93,31 +93,50 @@ multi_root() {
   printf '%s\n' "$(_strip_trailing_slashes "$root")"
 }
 
-# shared_dir -> <root>/shared      DATA PRODUCER
-shared_dir() {
+# _root_join <suffix> -> <root>/<suffix>, with the same normalisation
+# multi_root applies to HOME=/: a root of "/" composes to "/shared", never
+# "//shared". Every derived getter goes through here so the composition rule
+# lives in exactly one place. Internal; the suffix is appended verbatim.
+_root_join() {
   local root
   root="$(multi_root)"
-  printf '%s\n' "$root/shared"
+  if [[ "$root" == "/" ]]; then
+    root=""
+  fi
+  printf '%s\n' "$root/${1-}"
+}
+
+# shared_dir -> <root>/shared      DATA PRODUCER
+shared_dir() {
+  _root_join shared
 }
 
 # trash_dir -> <root>/.trash       DATA PRODUCER
 trash_dir() {
-  local root
-  root="$(multi_root)"
-  printf '%s\n' "$root/.trash"
+  _root_join .trash
 }
 
 # account_dir <name> -> <root>/<name>   DATA PRODUCER
+#
+# PRECONDITION: <name> MUST already have passed validate_name. This function
+# performs no validation of its own — it composes a path and nothing else, so
+# `..`, a leading dot, an absolute path and any other grammar violation are
+# appended verbatim. The grammar and the traversal guard live in validate_name,
+# deliberately in one place: duplicating them here would give the project two
+# gates to keep in sync, and the weaker one would decide. Callers that go on to
+# remove the composed path — Phase 5's purge and trash paths — are the reason
+# the precondition is written down rather than left to be inferred.
+#
 # Returns 1 and prints nothing for an empty name: "$root/" is the root itself,
 # and handing that to a caller that is about to remove it is how the tool
-# deletes everything.
+# deletes everything. That guard is here, not in validate_name, because it
+# protects the composition rather than the name.
 account_dir() {
-  local name="${1-}" root
+  local name="${1-}"
   if [[ -z "$name" ]]; then
     return 1
   fi
-  root="$(multi_root)"
-  printf '%s\n' "$root/$name"
+  _root_join "$name"
 }
 
 # validate_root_path <path> -> 0 if usable, else one stderr line and 1.

@@ -125,6 +125,50 @@ test_derived_paths_track_the_override() {
   assert_eq "$HOME/.claude-multi/shared" "$(shared_dir)"
 }
 
+# A root of "/" is pathological but legitimate, and multi_root already pins it
+# (test_multi_root_strips_trailing_slashes). The derived getters must apply the
+# same normalisation multi_root applies to HOME=/, so composing a suffix onto
+# it yields "/shared" and not "//shared". Cosmetic on Linux, which collapses
+# the two, but a path that is compared as a string rather than resolved makes
+# the inconsistency a real defect.
+test_derived_paths_do_not_double_the_slash_at_the_filesystem_root() {
+  export CLAUDE_MULTI_ROOT="/"
+  assert_eq "/" "$(multi_root)" "the root directory survives stripping"
+  assert_eq "/shared" "$(shared_dir)" "a root of / must not produce //shared"
+  assert_eq "/.trash" "$(trash_dir)" "a root of / must not produce //.trash"
+  assert_eq "/work" "$(account_dir work)" "a root of / must not produce //work"
+}
+
+# The same composition, one level down: a root given with trailing slashes is
+# normalised once, in multi_root, and every derived getter inherits that.
+test_derived_paths_normalise_a_root_given_with_a_trailing_slash() {
+  export CLAUDE_MULTI_ROOT="$TEST_TMP/r1/"
+  assert_eq "$TEST_TMP/r1/shared" "$(shared_dir)" "one trailing slash"
+  assert_eq "$TEST_TMP/r1/.trash" "$(trash_dir)"
+  assert_eq "$TEST_TMP/r1/work" "$(account_dir work)"
+  export CLAUDE_MULTI_ROOT="$TEST_TMP/r1///"
+  assert_eq "$TEST_TMP/r1/shared" "$(shared_dir)" "several trailing slashes"
+  assert_eq "$TEST_TMP/r1/.trash" "$(trash_dir)"
+  assert_eq "$TEST_TMP/r1/work" "$(account_dir work)"
+}
+
+# ── account_dir's precondition ────────────────────────────────────────────────
+# account_dir performs NO validation of its name beyond refusing an empty one:
+# the name grammar and the traversal guard live in validate_name (T8), and
+# Phase 5's destructive paths call validate_name before they compose a path.
+# This test documents the pass-through as it stands, so that changing it is a
+# deliberate decision rather than an accident. It is NOT a licence to add
+# validation here — that would duplicate T8's gate and give the project two
+# places to keep in sync.
+test_account_dir_does_not_validate_its_name() {
+  export CLAUDE_MULTI_ROOT="$TEST_TMP/r1"
+  assert_eq "$TEST_TMP/r1/.." "$(account_dir "..")" "traversal is passed through"
+  assert_eq "$TEST_TMP/r1/../../etc" "$(account_dir "../../etc")"
+  assert_eq "$TEST_TMP/r1//abs" "$(account_dir "/abs")" "an absolute name is appended, not honoured"
+  assert_eq "$TEST_TMP/r1/shared" "$(account_dir shared)" "a reserved name is the caller's business"
+  assert_eq "$TEST_TMP/r1/Not A Name" "$(account_dir "Not A Name")"
+}
+
 # ── a getter must never touch the filesystem ─────────────────────────────────
 test_getters_create_nothing() {
   export CLAUDE_MULTI_ROOT="$TEST_TMP/never-created"
