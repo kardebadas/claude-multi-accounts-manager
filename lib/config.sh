@@ -32,18 +32,26 @@
 #   Callers MUST capture them — `root="$(multi_root)"`. Nothing in bin/ or
 #   lib/ may call one bare, or the value lands on claude's stdout.
 #
-#   The four per-item accessors refuse an unknown or empty name by returning 1
-#   and printing NOTHING on either channel — the same rule account_dir follows.
-#   The caller decides what to say about it; a getter that narrated would put
-#   its sentence on claude's stdout.
+#   The last three producers in that list take an item name, and all three
+#   refuse an unknown or empty one by returning 1 and printing NOTHING on
+#   either channel — as does the internal row lookup they are built on, and as
+#   account_dir does. Deliberately not naming them again here: the list above
+#   is the one declaration, and a name repeated in prose would satisfy the
+#   guard test while the list a stdout audit reads had lost it. The caller
+#   decides what to say about a refusal; a getter that narrated would put its
+#   sentence on claude's stdout.
 #
 #   DIAGNOSTIC PREDICATES — return 0/1 and write only to stderr, never stdout.
 #       validate_root_path   one error line to stderr on refusal
 #       is_reserved_name     silent; no output on either channel
 #
-# So: a stdout audit must leave the nine producers alone, and hold the two
-# predicates to zero bytes of stdout. `_shared_item_row` is internal and is a
-# producer too, for the same reason.
+# So: a stdout audit must leave all nine producers named in the list above
+# alone, and hold the two predicates to zero bytes of stdout. The internal
+# `_shared_item_row` is a tenth producer, for the same reason — it is left out
+# of the list only because it is not part of the public surface, and its value
+# is consumed via $( ) exactly like the rest. Ten producers in this file; a
+# function missing from here is a function a later sweep redirects to stderr,
+# which silently empties every $( ) caller of it.
 
 # ── reserved names ───────────────────────────────────────────────────────────
 # Names that can never be an account, because the layout already uses them:

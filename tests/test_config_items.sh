@@ -61,13 +61,20 @@ _has_line() {
   return 1
 }
 
-# _channels_block -> the CHANNELS comment block from lib/config.sh.
+# _channels_block [file] -> the CHANNELS comment block from lib/config.sh,
+# or from [file] when one is given (the anchoring test passes a fixture).
 # Read with a redirect, not a pipeline, for the same reason as above.
+#
+# Anchored on the block's own delimiter line, "# ── CHANNELS", and not on any
+# line that merely contains the word: a later phase mentioning CHANNELS in a
+# comment above the block would otherwise make this helper return the wrong
+# lines, and the guard below would fail for a reason nobody could read. The
+# block ends at the first line that is not a comment.
 _channels_block() {
-  local line inside=0
+  local file="${1-$REPO_ROOT/lib/config.sh}" line inside=0
   while IFS= read -r line; do
     if ((inside == 0)); then
-      if [[ "$line" == *CHANNELS* ]]; then
+      if [[ "$line" == '# ── CHANNELS'* ]]; then
         inside=1
         printf '%s\n' "$line"
       fi
@@ -77,12 +84,19 @@ _channels_block() {
       return 0
     fi
     printf '%s\n' "$line"
-  done <"$REPO_ROOT/lib/config.sh"
+  done <"$file"
   return 0
 }
 
-# the seven names, in the order shared/ is seeded
+# the seven names, in the order shared/ is seeded, and the kind and origin each
+# one must report — index for index, so a per-name expected value is available
+# to any test that needs to pin an accessor's output exactly rather than merely
+# plausibly. An assertion that only checks membership in a set of legal values
+# also passes for the empty string, which is how a producer that stopped
+# producing gets through a channel test.
 _expected_names=(CLAUDE.md skills agents hooks commands agent-memory settings.json)
+_expected_kinds=(file dir dir dir dir dir file)
+_expected_origins=(copy link copy copy create copy rewrite)
 
 # ── the names, and their order ───────────────────────────────────────────────
 test_shared_item_names_lists_the_seven_items() {
@@ -338,30 +352,121 @@ test_the_accessors_write_their_value_to_stdout_only() {
   shared_item_names >"$out" 2>"$err"
   assert_eq "7" "$(_count_lines "$(cat "$out")")" "shared_item_names writes names to stdout"
   assert_eq "0" "$(_bytes "$err")" "shared_item_names must write nothing to stderr"
-  local name
+  # The value is asserted exactly, never as "is one of the legal values": a
+  # containment check against a set of legal values is satisfied by the empty
+  # string too, so an accessor that printed nothing at all would pass it.
+  local name i=0
   for name in "${_expected_names[@]}"; do
     shared_item_kind "$name" >"$out" 2>"$err"
-    assert_contains "file dir" "$(cat "$out")" "shared_item_kind $name on stdout"
+    assert_eq "${_expected_kinds[$i]}" "$(cat "$out")" "shared_item_kind $name on stdout"
     assert_eq "0" "$(_bytes "$err")" "shared_item_kind must write nothing to stderr"
     shared_item_origin "$name" >"$out" 2>"$err"
-    assert_contains "copy create link rewrite" "$(cat "$out")" "shared_item_origin $name on stdout"
+    assert_eq "${_expected_origins[$i]}" "$(cat "$out")" "shared_item_origin $name on stdout"
     assert_eq "0" "$(_bytes "$err")" "shared_item_origin must write nothing to stderr"
     account_link_target "$name" >"$out" 2>"$err"
     assert_eq "../shared/$name" "$(cat "$out")" "account_link_target $name on stdout"
     assert_eq "0" "$(_bytes "$err")" "account_link_target must write nothing to stderr"
+    i=$((i + 1))
   done
+  assert_eq "7" "$i" "every item was probed"
+}
+
+# _channels_producers [file] -> just the DATA PRODUCERS list from inside the
+# CHANNELS block, one "#       <fn> ..." line per producer.
+#
+# The guard below checks that list rather than the whole block. The block's
+# prose discusses functions too, so a whole-block containment check is
+# satisfied by a name that survives only in a sentence — while the list a later
+# stdout audit actually reads has lost it, which is precisely the drift the
+# guard exists to catch. The list runs from the "DATA PRODUCERS" heading to the
+# "Callers MUST capture" line that closes it.
+_channels_producers() {
+  local block line inside=0
+  if (($# > 0)); then
+    block="$(_channels_block "$1")"
+  else
+    block="$(_channels_block)"
+  fi
+  while IFS= read -r line; do
+    if ((inside == 0)); then
+      if [[ "$line" == *"DATA PRODUCERS"* ]]; then
+        inside=1
+      fi
+      continue
+    fi
+    if [[ "$line" == *"Callers MUST capture"* ]]; then
+      return 0
+    fi
+    printf '%s\n' "$line"
+  done <<<"$block"
+  return 0
+}
+
+# _channels_block must anchor on the real block delimiter, not on the first
+# line that happens to contain the word CHANNELS. A later phase adding a
+# comment that mentions CHANNELS above the block would otherwise make the
+# guard below read the wrong lines and report a baffling failure.
+test_the_channels_block_extractor_is_anchored_to_the_real_block() {
+  local fixture="$TEST_TMP/decoy-config.sh" block
+  {
+    printf '# a decoy comment that mentions CHANNELS in passing\n'
+    printf '# DECOY-ONLY-LINE\n'
+    printf '\n'
+    printf 'decoy_fn() { :; }\n'
+    printf '\n'
+    printf '# \xe2\x94\x80\xe2\x94\x80 CHANNELS (load-bearing; do not "purge stdout" here) \xe2\x94\x80\n'
+    printf '#   DATA PRODUCERS\n'
+    printf '#       REAL-BLOCK-ONLY-LINE\n'
+    printf '\n'
+    printf '# a trailing comment that mentions CHANNELS again\n'
+  } >"$fixture"
+  block="$(_channels_block "$fixture")"
+  assert_contains "$block" "REAL-BLOCK-ONLY-LINE" \
+    "the real CHANNELS block must be the block extracted"
+  if _has_line "$block" "# DECOY-ONLY-LINE"; then
+    printf '  FAIL: _channels_block latched onto a decoy mention of CHANNELS\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+# The producers list is the one declaration, and a name mentioned only in the
+# block's prose must not satisfy it — otherwise dropping a function from the
+# list goes unnoticed and a later stdout audit redirects a data producer to
+# stderr, silently emptying every $( ) caller of it.
+test_a_prose_mention_does_not_count_as_a_channels_declaration() {
+  local fixture="$TEST_TMP/prose-only-config.sh" producers
+  {
+    printf '# \xe2\x94\x80\xe2\x94\x80 CHANNELS (load-bearing) \xe2\x94\x80\n'
+    printf '#   DATA PRODUCERS\n'
+    printf '#       listed_producer   in the list\n'
+    printf '#   Callers MUST capture them.\n'
+    printf '#\n'
+    printf '#   prose_only_producer is discussed here and nowhere else.\n'
+    printf '\n'
+  } >"$fixture"
+  producers="$(_channels_producers "$fixture")"
+  assert_contains "$producers" "listed_producer" \
+    "a listed producer must be found in the list"
+  if [[ "$producers" == *prose_only_producer* ]]; then
+    printf '  FAIL: a prose-only mention was accepted as a declaration\n' >&2
+    return 1
+  fi
+  return 0
 }
 
 # The CHANNELS block in lib/config.sh is the defence against a later phase's
 # blanket "purge stdout" sweep. Every function added to the library has to be
 # declared in it, on the correct side.
 test_every_accessor_is_declared_in_the_channels_block() {
-  local block fn
+  local block producers fn
   block="$(_channels_block)"
   assert_contains "$block" "CHANNELS"
+  producers="$(_channels_producers)"
   for fn in shared_items shared_item_names shared_item_kind shared_item_origin \
             account_link_target; do
-    assert_contains "$block" "$fn" "$fn must be declared in the CHANNELS block"
+    assert_contains "$producers" "$fn" \
+      "$fn must be declared in the CHANNELS block's DATA PRODUCERS list"
   done
 }
 
