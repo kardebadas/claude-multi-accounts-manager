@@ -216,17 +216,48 @@ reject() {
 # anything grep is willing to read — so the answer tracks the scanner's own
 # heuristic rather than a second guess at it. An empty blob is not unscannable;
 # there is simply nothing in it, so its size is checked first.
+#
+# THE WRITER IS NEUTRALISED ON PURPOSE, and the status is read explicitly. This
+# used to be a plain `if git show … | grep -Iq …`, which had a live bug:
+#
+#   `grep -q` exits at its FIRST match, closing the pipe while `git show` still
+#   has most of a large blob to write. git dies of SIGPIPE, `set -o pipefail`
+#   reports the pipeline as 141, the `if` reads 141 as false — and an ordinary
+#   UTF-8 shell script is classified binary and REFUSED. It depends on whether
+#   the writer got to finish first, so it surfaced as roughly one suite run in
+#   five refusing a different innocent file each time, sometimes the guard's own
+#   test file.
+#
+# Reproduced deterministically rather than argued about: with a blob larger than
+# the 64 KiB pipe buffer the writer CANNOT finish first. The old construct then
+# returned 141 on 10 of 10 runs; this one returns 0 on 10 of 10.
+#
+# `|| true` on the writer is the fix, and the reason it is the fix rather than a
+# workaround: with the producer's status forced to 0 the pipeline's status is
+# grep's alone, so a signal can no longer masquerade as an answer. Note that
+# dropping `-q` so grep consumes the whole blob does NOT fix this — measured on
+# ugrep 7.8.4, the grep on the machine where this was found, `grep -Ic -e ''`
+# still short-circuits and still produced 141 on 8 of 8 runs. The signal has to
+# be neutralised, not avoided, and that holds for any grep.
+#
+# The three outcomes are then spelled out instead of collapsed into true/false,
+# so a grep that ERRORS is refused rather than assumed to have scanned cleanly.
+# The regression pins are t_a_large_text_blob_is_not_refused_as_binary and
+# t_a_sigpipe_writer_is_not_read_as_binary in tests/test_check_no_secrets.sh.
 blob_is_unscannable() {
-  local bytes
+  local bytes status
   bytes="$(git -C "$1" cat-file -s ":$2" 2>/dev/null || true)"
   bytes="${bytes//[^0-9]/}"
   if [[ -z "$bytes" || "$bytes" == "0" ]]; then
     return 1
   fi
-  if git -C "$1" show ":$2" 2>/dev/null | grep -Iq -e ''; then
-    return 1
-  fi
-  return 0
+  status=0
+  { git -C "$1" show ":$2" 2>/dev/null || true; } | grep -Iq -e '' || status=$?
+  case "$status" in
+    0) return 1 ;;  # grep was willing to read it — scannable
+    1) return 0 ;;  # grep refused it as binary (-I) — unscannable
+    *) return 0 ;;  # grep itself failed — refuse rather than pretend it scanned
+  esac
 }
 
 # ── the check ────────────────────────────────────────────────────────────────
