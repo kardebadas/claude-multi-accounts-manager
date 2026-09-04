@@ -591,8 +591,9 @@ t_unknown_argument_fails() {
   out="$(bash scripts/check-no-secrets.sh --bogus 2>&1 >/dev/null || true)"
   assert_contains "$out" "unknown argument" "an unknown argument must be explained"
   assert_no_stdout bash scripts/check-no-secrets.sh --bogus
-  # --install-hook arrives in T12; until then it must not silently pass.
-  assert_fails bash scripts/check-no-secrets.sh --install-hook
+  # --install-hook was the placeholder here while it did not exist yet. It is a
+  # real argument now; its whole contract lives in tests/test_precommit_hook.sh,
+  # including that `--install-hook --bogus` is still an error.
 }
 
 # ── outside a git repository the guard must say so, not crash ────────────────

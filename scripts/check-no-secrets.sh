@@ -7,11 +7,19 @@
 # commit if anything there looks like user configuration, account state, a
 # credential, an archive, a log, or an absolute home path.
 #
-#   scripts/check-no-secrets.sh     check the staged index
+#   scripts/check-no-secrets.sh                          check the staged index
+#   scripts/check-no-secrets.sh --install-hook           wire it into git
+#   scripts/check-no-secrets.sh --install-hook --force   … replacing a foreign hook
+#
+# Nothing calls this script on its own, so --install-hook is what turns the gate
+# on: it writes the repository's pre-commit hook. `.git/hooks` is not tracked,
+# which makes that a setup action rather than a committed file — it has to be
+# re-run on a fresh clone.
 #
 # Exit status:
-#   0  nothing objectionable is staged
-#   1  something is refused (each one named on stderr, with the rule)
+#   0  nothing objectionable is staged / the hook is installed
+#   1  something is refused (each one named on stderr, with the rule), or a
+#      pre-commit hook this script did not write is in the way
 #   2  the invocation itself is wrong (unknown argument, or not in a repo)
 #
 # Output: everything goes to STDERR. This script writes NOTHING to stdout, ever
@@ -309,13 +317,151 @@ check_staged() {
   return 0
 }
 
+# ── hook installation ────────────────────────────────────────────────────────
+# hooks_dir_for <toplevel> — the directory git will actually look in for hooks,
+# echoed for a $( ) caller. Nothing else in this script returns data, and this
+# is only ever called inside a command substitution, so the script's own stdout
+# stays byte-empty.
+#
+# Two ways the answer is not simply "<toplevel>/.git/hooks":
+#
+#  * In a LINKED WORKTREE `.git` is a file, not a directory, and hooks live in
+#    the common git dir shared with every other worktree. `git rev-parse
+#    --git-path hooks` resolves that correctly; a hand-built path does not, and
+#    would create a stray `.git/hooks` file tree git never reads.
+#  * `core.hooksPath` redirects hooks wherever it likes. Ignoring it would be
+#    the worse failure: the hook would land somewhere git never looks while the
+#    operator believed the gate was on. So it is honoured — but only inside this
+#    repository. It can name any directory on the filesystem, including one in
+#    somebody else's tree, and this installer never writes outside the repo it
+#    was pointed at.
+hooks_dir_for() {
+  local top="$1" dir common
+  dir="$(git -C "$top" config --get core.hooksPath 2>/dev/null || true)"
+  if [[ -z "$dir" ]]; then
+    dir="$(git -C "$top" rev-parse --git-path hooks)"
+  fi
+  # git resolves a relative core.hooksPath against the worktree root, and
+  # --git-path answers relative to the directory it was run in ("$top").
+  case "$dir" in /*) ;; *) dir="$top/$dir" ;; esac
+
+  common="$(git -C "$top" rev-parse --git-common-dir)"
+  case "$common" in /*) ;; *) common="$top/$common" ;; esac
+
+  # A `..` segment can climb out of either prefix, so it is refused rather than
+  # normalised — no legitimate hooks path needs one, and normalising by hand is
+  # how containment checks get quietly defeated.
+  case "$dir" in
+    ../*|*/../*|*/..)
+      printf '%s: core.hooksPath contains a ".." segment: %s\n' "$prog" "$dir" >&2
+      printf '%s: refusing to resolve it. Point core.hooksPath inside the repository.\n' "$prog" >&2
+      return 2
+      ;;
+  esac
+  if [[ "$dir/" != "$top/"* && "$dir/" != "$common/"* ]]; then
+    printf '%s: core.hooksPath points outside this repository: %s\n' "$prog" "$dir" >&2
+    printf '%s: refusing to install a hook there. Unset core.hooksPath, or point it inside the repo.\n' \
+      "$prog" >&2
+    return 2
+  fi
+  printf '%s\n' "$dir"
+}
+
+# install_hook [--force] — write this script into the repository's pre-commit
+# hook, executable, and idempotently: re-running it produces a byte-identical
+# file. Three things it must never do, each pinned by a test in
+# tests/test_precommit_hook.sh:
+#
+#  * overwrite a pre-commit hook it did not write. Somebody else's hook is
+#    somebody else's; --force is the explicit override, and the refusal prints
+#    the one line to paste if they would rather merge the two by hand.
+#  * write THROUGH a symlink. `cat >"$hook"` on a symlinked hook writes to
+#    wherever the link points, which can be any file on the filesystem. --force
+#    replaces the LINK and leaves its target untouched.
+#  * write outside the repository (see hooks_dir_for). --force is an override
+#    for a foreign hook, not a licence to escape the repo.
+#
+# The hook resolves the guard's path at run time rather than baking it in. That
+# is deliberate three times over: the checkout can be moved or renamed, linked
+# worktrees SHARE this hooks directory and each must run its own worktree's
+# guard, and a baked-in path would write an absolute home path into a file for
+# no benefit.
+install_hook() {
+  local top hook dir force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=1 ;;
+      *)
+        printf '%s: unknown argument to --install-hook: %s\n' "$prog" "$arg" >&2
+        printf '%s: usage: %s --install-hook [--force]\n' "$prog" "$prog" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$top" ]]; then
+    printf '%s: not inside a git repository — there is no hooks directory to install into\n' \
+      "$prog" >&2
+    return 2
+  fi
+
+  # `if !` rather than a bare assignment: a failing $( ) in an assignment aborts
+  # the script under errexit, which would skip main's status handling entirely.
+  if ! dir="$(hooks_dir_for "$top")"; then
+    return 2
+  fi
+  hook="$dir/pre-commit"
+
+  if [[ -L "$hook" ]]; then
+    if ((force == 0)); then
+      printf '%s: %s is a symlink — not clobbering it\n' "$prog" "$hook" >&2
+      printf '%s: re-run with --force to replace the symlink (its target is left alone)\n' \
+        "$prog" >&2
+      return 1
+    fi
+    rm -f -- "$hook"
+  # An unreadable hook makes grep fail, which lands here as "not ours" and is
+  # refused. That is the safe direction: never overwrite what cannot be read.
+  elif [[ -e "$hook" ]] && ! grep -q -e 'check-no-secrets.sh' "$hook"; then
+    if ((force == 0)); then
+      printf '%s: %s exists and is not ours — not clobbering it\n' "$prog" "$hook" >&2
+      printf '%s: add this line to it yourself:\n' "$prog" >&2
+      printf '%s:   exec "$(git rev-parse --show-toplevel)/scripts/check-no-secrets.sh"\n' \
+        "$prog" >&2
+      printf '%s: or re-run with --force to replace it\n' "$prog" >&2
+      return 1
+    fi
+  fi
+
+  mkdir -p -- "$dir"
+  cat >"$hook" <<'HOOK'
+#!/usr/bin/env bash
+# Installed by scripts/check-no-secrets.sh --install-hook. Do not edit — run
+# that command again to regenerate this file.
+set -euo pipefail
+guard="$(git rev-parse --show-toplevel)/scripts/check-no-secrets.sh"
+if [[ ! -f "$guard" ]]; then
+  printf 'pre-commit: %s is missing — the secret guard cannot run\n' "$guard" >&2
+  printf 'pre-commit: restore it, or remove this hook if you know what you are doing\n' >&2
+  exit 1
+fi
+exec bash -- "$guard"
+HOOK
+  chmod +x -- "$hook"
+  printf '%s: installed pre-commit hook at %s\n' "$prog" "$hook" >&2
+  return 0
+}
+
 main() {
-  # --install-hook arrives in T12; until then it must not silently pass.
   case "${1-}" in
     "") check_staged ;;
+    --install-hook) install_hook "${@:2}" ;;
     *)
       printf '%s: unknown argument: %s\n' "$prog" "$1" >&2
-      printf '%s: usage: %s   (no arguments; checks the staged index)\n' "$prog" "$prog" >&2
+      printf '%s: usage: %s                        (no arguments; checks the staged index)\n' \
+        "$prog" "$prog" >&2
+      printf '%s:        %s --install-hook [--force]\n' "$prog" "$prog" >&2
       return 2
       ;;
   esac
