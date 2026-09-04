@@ -15,11 +15,40 @@
 # point a test straight at a live account. Nothing under the real $HOME is read
 # or written by any test.
 #
+# The runner's own bookkeeping — the per-test HOME and the captured output —
+# lives beside the test's cwd, never inside it, so a test that clears its cwd
+# (this project's tests do exercise `rm -rf`) cannot destroy the records the
+# runner needs to report the result, and so a test can assert on its own cwd
+# without having to know about runner-owned entries.
+#
 # Everything this runner prints — progress, failure reports, the summary — goes
 # to stderr. stdout is reserved project-wide so `claude-multi work -p "…" | jq`
 # is never corrupted, and the runner holds itself to the same rule so it can be
 # composed into any pipeline without polluting it.
 set -euo pipefail
+
+# ── runaway-recursion guard ──────────────────────────────────────────────────
+# A test file that invokes this runner with no arguments rediscovers itself and
+# recurses without bound: every level captures its child's output and prints
+# nothing until the child finishes, so the observable symptom is a silent hang
+# that fills TMPDIR one temp dir per level. The real suite nests two levels
+# deep (the suite runs a test file, which runs the runner against a mini tree),
+# so a small cap costs nothing and turns that hang into one line and exit 1.
+CLAUDE_MULTI_TEST_MAX_DEPTH=4
+_depth=$(( ${CLAUDE_MULTI_TEST_DEPTH:-0} + 1 ))
+if ((_depth > CLAUDE_MULTI_TEST_MAX_DEPTH)); then
+  printf 'tests/run.sh: refusing to nest deeper than %d levels — runaway recursion (does a test file invoke tests/run.sh with no arguments?)\n' \
+    "$CLAUDE_MULTI_TEST_MAX_DEPTH" >&2
+  exit 1
+fi
+export CLAUDE_MULTI_TEST_DEPTH="$_depth"
+
+# The real home is recorded for REAL_HOME_GUARD, so an unset HOME is a hard
+# stop — stated as a sentence rather than left to `set -u`.
+if [[ -z "${HOME:-}" ]]; then
+  printf 'tests/run.sh: HOME is unset in this environment; it is needed to record REAL_HOME_GUARD\n' >&2
+  exit 1
+fi
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -46,6 +75,24 @@ real_home="$HOME"
 passed=0
 declare -a failed=()
 
+# One temp dir per test file, removed as soon as that file finishes — and by
+# the EXIT trap if the run is interrupted part way through one.
+tmp=""
+_cleanup_tmp() {
+  local doomed="${tmp:-}"
+  tmp=""
+  [[ -n "$doomed" && -d "$doomed" ]] || return 0
+  # Composed from mktemp output, but check the shape before rm -rf anyway.
+  case "$doomed" in
+    */claude-multi-test.*) rm -rf -- "$doomed" ;;
+    *) printf 'refusing to remove unexpected temp dir: %s\n' "$doomed" >&2 ;;
+  esac
+  return 0
+}
+trap _cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 for path in "${files[@]}"; do
   name="$(basename -- "$path")"
   if [[ ! -f "$path" ]]; then
@@ -55,7 +102,8 @@ for path in "${files[@]}"; do
   fi
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/claude-multi-test.XXXXXX")"
-  mkdir -p -- "$tmp/home"
+  # $tmp/cwd is the test's; $tmp/home and $tmp/output are the runner's.
+  mkdir -p -- "$tmp/home" "$tmp/cwd"
   out="$tmp/output"
 
   if (
@@ -63,25 +111,24 @@ for path in "${files[@]}"; do
     export HOME="$tmp/home"
     export CLAUDE_MULTI_ROOT="$tmp/home/.claude-multi"
     export REPO_ROOT
-    export TEST_TMP="$tmp"
+    export TEST_TMP="$tmp/cwd"
     export REAL_HOME_GUARD="$real_home"
     unset CLAUDE_CONFIG_DIR
-    cd -- "$tmp"
+    cd -- "$tmp/cwd"
     bash -- "$path"
   ) >"$out" 2>&1; then
     printf 'ok    %s\n' "$name" >&2
     passed=$((passed + 1))
   else
     printf 'FAIL  %s\n' "$name" >&2
-    sed 's/^/      /' "$out" >&2
+    # The capture is out of the test's reach, but a runner must never let a
+    # missing file abort the whole run under `set -e`.
+    sed 's/^/      /' "$out" >&2 \
+      || printf '      (runner capture file unreadable)\n' >&2
     failed+=("$name")
   fi
 
-  # Composed from mktemp output, but check the shape before rm -rf anyway.
-  case "$tmp" in
-    */claude-multi-test.*) rm -rf -- "$tmp" ;;
-    *) printf 'refusing to remove unexpected temp dir: %s\n' "$tmp" >&2 ;;
-  esac
+  _cleanup_tmp
 done
 
 printf '\n%d passed, %d failed\n' "$passed" "${#failed[@]}" >&2
