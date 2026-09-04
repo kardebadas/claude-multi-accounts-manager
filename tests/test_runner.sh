@@ -124,6 +124,47 @@ assert_eq "1" "$code" "runaway recursion must exit 1, not hang until killed"
 assert_contains "$out" "refusing to nest" "the depth cap must say why it refused"
 assert_eq "" "$(ls -A "$rec_tmp")" "a capped run must leave no temp dirs behind"
 
+# ── the cap must leave usable margin above the suite's own nesting ───────────
+# The suite nests 2 levels structurally (this file runs the runner against a
+# miniature tests tree); the recursion pin above then drives the runner to the
+# cap on purpose, so the depth the suite is *observed* to reach is always the
+# cap and says nothing about margin. The margin is cap - 2: the inherited depth
+# a run can start from and still finish. At a cap of 4 that was 2, and a suite
+# started at inherited depth 3 failed with a misleading assertion rather than a
+# "cap refused" diagnostic. Asked from outside — an inherited depth past the
+# cap makes the runner state its own ceiling — so this pin adds no nesting.
+set +e
+out="$(CLAUDE_MULTI_TEST_DEPTH=999 bash "$mini/tests/run.sh" "tests/test_alpha.sh" 2>&1)"
+code=$?
+set -e
+assert_eq "1" "$code" "an inherited depth past the cap must refuse"
+cap_stated=0
+if [[ "$out" =~ deeper\ than\ ([0-9]+)\ levels ]]; then
+  cap_stated="${BASH_REMATCH[1]}"
+fi
+if ((cap_stated < 6)); then
+  printf '  FAIL: the depth cap [%s] leaves too little margin above the 2 levels this suite nests\n' \
+    "$cap_stated" >&2
+  exit 1
+fi
+
+# ── a malformed depth counter must be a sentence, not a bash internal error ──
+# Only run.sh itself ever sets CLAUDE_MULTI_TEST_DEPTH, but an inherited junk
+# value used to reach `$(( … ))` raw: `abc: unbound variable` under `set -u`,
+# `1foo: value too great for base`. Same class as the unset-HOME guard below.
+for bad in abc 1foo -3 "2 3"; do
+  set +e
+  out="$(CLAUDE_MULTI_TEST_DEPTH="$bad" \
+    bash "$REPO_ROOT/tests/run.sh" "tests/test_assert.sh" 2>&1)"
+  code=$?
+  set -e
+  assert_eq "1" "$code" "a malformed depth counter [$bad] must fail safe"
+  assert_contains "$out" "CLAUDE_MULTI_TEST_DEPTH must be" \
+    "the diagnostic must name the variable [$bad]"
+  assert_eq "" "$(printf '%s\n' "$out" | grep -E 'run\.sh: line [0-9]+' || true)" \
+    "a malformed depth counter [$bad] must not surface as a raw bash error"
+done
+
 # ── a test that clears its own cwd must not truncate the run ─────────────────
 # The runner's capture file used to live in the test's cwd, so a failing test
 # that wiped its cwd made the runner's own `sed` fail under `set -e`: exit 2,
@@ -149,6 +190,29 @@ assert_contains "$out" "test_ddd.sh" "files after the wiping test must still run
 assert_eq "" "$(printf '%s\n' "$out" | grep -F 'sed:' || true)" \
   "the runner's capture must be out of reach of the test's cwd"
 assert_eq "" "$(ls -A "$wipe_tmp")" "no temp dir may leak"
+
+# ── destroying the runner's own capture must not garble the report ───────────
+# The capture lives one `..` above the test's cwd, so a test that deliberately
+# reaches out of its cwd can still delete it. The fallback line covers that,
+# but sed's own complaint must not reach the report un-indented beside it.
+cap="$TEST_TMP/cap"
+mkdir -p "$cap/tests"
+cp "$REPO_ROOT/tests/run.sh" "$cap/tests/run.sh"
+printf 'set -euo pipefail\nrm -f -- "$TEST_TMP/../output"\nexit 1\n' \
+  >"$cap/tests/test_nocap.sh"
+printf 'set -euo pipefail\nexit 0\n' >"$cap/tests/test_zzz.sh"
+cap_tmp="$TEST_TMP/cap-tmp"
+mkdir -p "$cap_tmp"
+set +e
+out="$(TMPDIR="$cap_tmp" bash "$cap/tests/run.sh" 2>&1)"
+code=$?
+set -e
+assert_eq "1" "$code" "a test that deletes the capture must still exit 1"
+assert_contains "$out" "1 passed, 1 failed" "the summary must still be printed"
+assert_contains "$out" "capture file unreadable" "the fallback line must be printed"
+assert_eq "" "$(printf '%s\n' "$out" | grep -F 'sed:' || true)" \
+  "sed's own error must not reach the report un-indented"
+assert_eq "" "$(ls -A "$cap_tmp")" "no temp dir may leak"
 
 # ── an unset HOME must be a sentence, not a bash internal error ──────────────
 set +e

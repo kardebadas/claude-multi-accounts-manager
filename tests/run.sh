@@ -31,11 +31,36 @@ set -euo pipefail
 # A test file that invokes this runner with no arguments rediscovers itself and
 # recurses without bound: every level captures its child's output and prints
 # nothing until the child finishes, so the observable symptom is a silent hang
-# that fills TMPDIR one temp dir per level. The real suite nests two levels
-# deep (the suite runs a test file, which runs the runner against a mini tree),
-# so a small cap costs nothing and turns that hang into one line and exit 1.
-CLAUDE_MULTI_TEST_MAX_DEPTH=4
-_depth=$(( ${CLAUDE_MULTI_TEST_DEPTH:-0} + 1 ))
+# that fills TMPDIR one temp dir per level. The cap turns that hang into one
+# line and exit 1.
+#
+# Measured, not guessed, by instrumenting this line and counting the depths the
+# real suite actually enters. Two different numbers, and only one of them is a
+# budget:
+#   * structural nesting is 2 — the suite runs a test file, which runs the
+#     runner against a miniature tests tree. That is what the cap must clear.
+#   * the depth the whole suite is observed to reach is always the cap itself,
+#     because the recursion pin in tests/test_runner.sh deliberately drives the
+#     runner until it refuses. Raising the cap raises that observation in
+#     lockstep, so it is not a headroom measurement and must not be read as one.
+# So the usable margin is cap - 2, the inherited depth a run can start from and
+# still finish. Measured at this cap: inherited depth 0-6 pass, 7 refuses. At
+# the previous cap of 4 that margin was 2, and a suite started at inherited
+# depth 3 failed with a misleading assertion instead of a "cap refused" line.
+# Refusal costs the same fraction of a second at 8 as at 4, so the margin is
+# free. Do not lower this below structural nesting plus a few spare levels, and
+# do not make it settable from the environment: the ceiling must not be
+# liftable by the thing it caps.
+CLAUDE_MULTI_TEST_MAX_DEPTH=8
+# A junk inherited value must be a sentence rather than a raw `set -u` abort or
+# an arithmetic parse error from inside $(( … )).
+_inherited_depth="${CLAUDE_MULTI_TEST_DEPTH:-0}"
+if [[ ! "$_inherited_depth" =~ ^[0-9]{1,4}$ ]]; then
+  printf 'tests/run.sh: CLAUDE_MULTI_TEST_DEPTH must be a non-negative integer of at most 4 digits; got [%s]\n' \
+    "$_inherited_depth" >&2
+  exit 1
+fi
+_depth=$(( _inherited_depth + 1 ))
 if ((_depth > CLAUDE_MULTI_TEST_MAX_DEPTH)); then
   printf 'tests/run.sh: refusing to nest deeper than %d levels — runaway recursion (does a test file invoke tests/run.sh with no arguments?)\n' \
     "$CLAUDE_MULTI_TEST_MAX_DEPTH" >&2
@@ -123,7 +148,9 @@ for path in "${files[@]}"; do
     printf 'FAIL  %s\n' "$name" >&2
     # The capture is out of the test's reach, but a runner must never let a
     # missing file abort the whole run under `set -e`.
-    sed 's/^/      /' "$out" >&2 \
+    # sed's own "can't read" line would land un-indented beside the fallback,
+    # so its stderr is dropped and the fallback line carries the report.
+    sed 's/^/      /' "$out" >&2 2>/dev/null \
       || printf '      (runner capture file unreadable)\n' >&2
     failed+=("$name")
   fi
