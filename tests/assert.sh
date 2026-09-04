@@ -1,5 +1,8 @@
-#!/usr/bin/env bash
+# shellcheck shell=bash
 # tests/assert.sh — assertion helpers. Sourced by tests/test_*.sh.
+#
+# Sourced, never executed: no shebang, and the file is not executable. It also
+# deliberately omits `set -euo pipefail`, which would leak into the caller.
 #
 # Contract: an assertion returns 0 on success, and on failure prints one
 # "  FAIL: …" line to STDERR and returns 1. Test files run under
@@ -56,6 +59,12 @@ assert_fails() {
 
 # assert_no_stdout <command> [args...]
 # The whole point of the project: stdout belongs to claude.
+#
+# Content-level check: it captures stdout and reports what leaked, which makes
+# it the right tool for "did this print something it should not have". Because
+# it uses a command substitution it cannot see stdout that is *only* trailing
+# newlines or *only* NUL bytes — for the byte-exact guarantee, use
+# assert_stdout_empty_bytes below. Both are kept on purpose.
 assert_no_stdout() {
   local out=""
   out="$("$@" 2>/dev/null || true)"
@@ -63,4 +72,29 @@ assert_no_stdout() {
     return 0
   fi
   _assert_fail "assert_no_stdout: [$*] wrote to stdout: [$out]"
+}
+
+# assert_stdout_empty_bytes <command> [args...]
+# Byte-exact stdout emptiness: 0 if the command wrote *zero bytes* to stdout.
+#
+# This is the assertion for the project's binding guarantee — the launch path
+# must leave stdout byte-empty so `claude-multi work -p "…" | jq` is never
+# corrupted. A bare `echo` on that path emits exactly one byte, and a command
+# substitution cannot express the difference: it strips trailing newlines, and
+# drops NUL bytes while making bash print "warning: command substitution:
+# ignored null byte in input" under this file's own name. Counting bytes out of
+# a pipe avoids both: `wc` reports every byte, and only its digits cross the
+# substitution boundary.
+#
+# stderr is discarded and the command's exit status is deliberately ignored,
+# matching assert_no_stdout — the contract is about stdout alone. Compose with
+# assert_fails to check the status too.
+assert_stdout_empty_bytes() {
+  local bytes=""
+  bytes="$( { "$@" || true; } 2>/dev/null | wc -c )"
+  bytes="${bytes//[[:space:]]/}"
+  if [[ "$bytes" == "0" ]]; then
+    return 0
+  fi
+  _assert_fail "assert_stdout_empty_bytes: [$*] wrote $bytes byte(s) to stdout, expected 0"
 }
