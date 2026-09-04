@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# tests/fake-claude — stub `claude` for the test suite.
+#
+# claude-multi resolves `claude` through PATH, so a test can point PATH at a
+# directory containing a symlink named `claude` to this file. It records what it
+# was handed and exits; it never launches anything.
+#
+#   FAKE_CLAUDE_LOG   where to record   (default $TEST_TMP/fake-claude.log,
+#                                        falling back to /tmp/fake-claude.log)
+#   FAKE_CLAUDE_EXIT  exit status       (default 0)
+#
+# Standard wiring, kept inline in each test that needs it:
+#
+#   mkdir -p "$TEST_TMP/bin"
+#   ln -sf "$REPO_ROOT/tests/fake-claude" "$TEST_TMP/bin/claude"
+#   export PATH="$TEST_TMP/bin:$PATH"
+#   export FAKE_CLAUDE_LOG="$TEST_TMP/invocation"
+#
+# ── RECORD FORMAT (two files, both truncated on every invocation) ────────────
+#
+# $FAKE_CLAUDE_LOG — line-oriented, for readable assertions. Exactly:
+#
+#   ARGC=<n>                          the number of arguments
+#   ARG=<value>                       one line per argument, in order (n lines)
+#   CLAUDE_CONFIG_DIR=<value>         empty if unset
+#   CLAUDE_CODE_PLUGIN_CACHE_DIR=<value>   empty if unset
+#   HOME=<value>                      empty if unset
+#   PWD=<value>                       the caller's cwd
+#
+# The ARG lines are a convenience, not the authority: an argument containing a
+# newline spans several lines here, and an empty argument is indistinguishable
+# from an empty value. Use them with assert_contains; use the file below when
+# the exact bytes matter.
+#
+# $FAKE_CLAUDE_LOG.argv — the authoritative argv: each argument followed by a
+# NUL byte, nothing else. NUL is the one byte an argument cannot contain, so
+# spaces, tabs, quotes, globs, leading dashes and newlines all round-trip
+# exactly. Zero arguments leaves a zero-byte file; one empty argument leaves a
+# single NUL byte. Read it back with:
+#
+#   declare -a argv=()
+#   while IFS= read -r -d '' a; do argv+=("$a"); done <"$log.argv"
+#
+# ── STDOUT ──────────────────────────────────────────────────────────────────
+# This stub writes nothing to stdout, ever — not one byte. Phase 6 asserts the
+# launch path leaves stdout byte-empty so `claude-multi work -p "…" | jq` is
+# never corrupted, and that assertion must measure claude-multi alone. Anything
+# a test needs to read is in the two files above. Diagnostics go to stderr, and
+# the success path emits none of those either, so a test may assert on
+# claude-multi's stderr without the stub's voice in it.
+set -euo pipefail
+
+log="${FAKE_CLAUDE_LOG:-${TEST_TMP:-/tmp}/fake-claude.log}"
+mkdir -p -- "$(dirname -- "$log")"
+
+{
+  printf 'ARGC=%s\n' "$#"
+  for a in "$@"; do
+    printf 'ARG=%s\n' "$a"
+  done
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR-}"
+  printf 'CLAUDE_CODE_PLUGIN_CACHE_DIR=%s\n' "${CLAUDE_CODE_PLUGIN_CACHE_DIR-}"
+  printf 'HOME=%s\n' "${HOME-}"
+  printf 'PWD=%s\n' "$PWD"
+} >"$log"
+
+# Truncated first, so zero arguments leaves an empty file rather than a stale
+# one from the previous invocation.
+: >"$log.argv"
+for a in "$@"; do
+  printf '%s\0' "$a" >>"$log.argv"
+done
+
+# Both records are complete before this point, so a test can still inspect what
+# a failing launch was handed.
+code="${FAKE_CLAUDE_EXIT:-0}"
+if [[ ! "$code" =~ ^[0-9]{1,3}$ ]] || ((10#$code > 255)); then
+  # `exit notanumber` would abort with bash's own "numeric argument required",
+  # which names this file's line number instead of the mistake. Say it plainly.
+  printf 'tests/fake-claude: FAKE_CLAUDE_EXIT must be an integer 0-255; got [%s]\n' \
+    "$code" >&2
+  exit 2
+fi
+exit "$code"
