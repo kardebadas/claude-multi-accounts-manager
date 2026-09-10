@@ -240,6 +240,87 @@ t_decode_slug_every_real_fixture_slug_round_trips() {
   cleanup_memory_fixture
 }
 
+t_decode_slug_returns_2_when_path_is_gone() {
+  make_memory_fixture
+  local slug out rc errfile
+  slug="$(fix_slug gone/project)"
+  errfile="$FIX_BASE/decode.err"
+  set +e
+  out="$(decode_slug "$slug" 2>"$errfile")"
+  rc=$?
+  set -e
+  assert_eq "2" "$rc" "a slug with no matching directory must exit 2"
+  assert_eq "" "$out" "exit 2 must print nothing on stdout"
+  assert_eq "" "$(cat "$errfile")" "a deleted project is silently skipped"
+  assert_stdout_empty_bytes decode_slug "$slug"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_returns_2_for_a_relative_slug() {
+  make_memory_fixture
+  local out rc
+  set +e
+  out="$(decode_slug "not-a-slug" 2>/dev/null)"
+  rc=$?
+  set -e
+  assert_eq "2" "$rc" "a slug not starting with '-' is not a project slug"
+  assert_eq "" "$out" "exit 2 must print nothing on stdout"
+  assert_stdout_empty_bytes decode_slug "not-a-slug"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_returns_3_on_hyphen_ambiguity() {
+  make_memory_fixture
+  local slug out rc err errfile
+  errfile="$FIX_BASE/decode.err"
+  slug="$(fix_slug amb/a-b)"
+  set +e
+  out="$(decode_slug "$slug" 2>"$errfile")"
+  rc=$?
+  set -e
+  err="$(cat "$errfile")"
+  assert_eq "3" "$rc" "two valid reconstructions must exit 3, not guess"
+  assert_eq "" "$out" "exit 3 must print nothing on stdout"
+  assert_contains "$err" "ambiguous" "exit 3 must warn on stderr"
+  assert_contains "$err" "$FIX_FS/amb/a-b" "the warning must list the candidates"
+  assert_contains "$err" "$FIX_FS/amb/a/b" "the warning must list the candidates"
+  assert_stdout_empty_bytes decode_slug "$slug"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_returns_3_on_underscore_ambiguity() {
+  make_memory_fixture
+  local rc
+  set +e
+  decode_slug "$(fix_slug und/my_app)" >/dev/null 2>&1
+  rc=$?
+  set -e
+  assert_eq "3" "$rc" "underscore versus literal hyphen is ambiguous"
+  set +e
+  decode_slug "$(fix_slug und/my-app)" >/dev/null 2>&1
+  rc=$?
+  set -e
+  assert_eq "3" "$rc" "both spellings encode to the same slug"
+  assert_stdout_empty_bytes decode_slug "$(fix_slug und/my_app)"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_returns_4_when_capped() {
+  make_memory_fixture
+  local rc err slug
+  slug="$(fix_slug projects/alpha-service)"
+  set +e
+  err="$(MEMORY_DECODE_MAX_NODES=3 decode_slug "$slug" 2>&1 >/dev/null)"
+  rc=$?
+  set -e
+  assert_eq "4" "$rc" "exceeding the node cap must exit 4"
+  assert_contains "$err" "search cap" "exit 4 must say why"
+  MEMORY_DECODE_MAX_NODES=3 assert_stdout_empty_bytes decode_slug "$slug"
+  assert_eq "$FIX_FS/projects/alpha-service" "$(decode_slug "$slug")" \
+    "a per-call cap must not affect a later default-cap call"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0

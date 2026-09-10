@@ -31,9 +31,15 @@ is_worktree_slug() {
 # Literal alternatives to a separator for each lossy '-' in a slug.
 MEMORY_LITERAL_CANDIDATES=('-' '.' '_' ' ')
 
+# Bound the search; read the override anew for each decode call.
+: "${MEMORY_DECODE_MAX_NODES:=20000}"
+
 # Module-private search state; decode_slug is not reentrant.
 _DECODE_RESULTS=()
 _DECODE_COUNT=0
+_DECODE_NODES=0
+_DECODE_OVERFLOW=0
+_DECODE_CAP=20000
 
 # _decode_prefix_exists <dir> <prefix> -> whether an entry has this prefix.
 # Quoting the prefix keeps its characters literal while '*' extends it.
@@ -51,6 +57,12 @@ _decode_prefix_exists() {
 # An empty confirmed_dir represents root. Results accumulate without output.
 _decode_walk() {
   local dir="$1" comp="$2" rest="$3" ch lit
+
+  _DECODE_NODES=$(( _DECODE_NODES + 1 ))
+  if (( _DECODE_NODES > _DECODE_CAP )); then
+    _DECODE_OVERFLOW=1
+    return 0
+  fi
 
   if [[ -z $rest ]]; then
     if [[ -n $comp && -d "$dir/$comp" ]]; then
@@ -81,21 +93,33 @@ _decode_walk() {
   return 0
 }
 
-# decode_slug <slug> -> the single existing absolute directory, or exit 1.
-# Failure never prints a guessed candidate to stdout.
+# decode_slug <slug> -> the single existing absolute directory on stdout.
+# 0 = unique match; 2 = none; 3 = ambiguous; 4 = search cap exceeded.
+# Every nonzero exit writes zero bytes to stdout; diagnostics use stderr.
 decode_slug() {
   local slug="${1:?decode_slug: slug required}"
   _DECODE_RESULTS=()
   _DECODE_COUNT=0
+  _DECODE_NODES=0
+  _DECODE_OVERFLOW=0
+  _DECODE_CAP="${MEMORY_DECODE_MAX_NODES:-20000}"
 
   if [[ $slug != -* ]]; then
-    return 1
+    return 2
   fi
 
   # The first '-' encodes the leading '/'.
   _decode_walk "" "" "${slug:1}"
-  if (( _DECODE_COUNT != 1 )); then
-    return 1
+  if (( _DECODE_OVERFLOW )); then
+    warn "decode_slug: search cap ($_DECODE_CAP nodes) exceeded for $slug — skipping"
+    return 4
+  fi
+  if (( _DECODE_COUNT == 0 )); then
+    return 2
+  fi
+  if (( _DECODE_COUNT > 1 )); then
+    warn "decode_slug: $slug is ambiguous ($_DECODE_COUNT candidates: ${_DECODE_RESULTS[*]}) — skipping"
+    return 3
   fi
   printf '%s\n' "${_DECODE_RESULTS[0]}"
   return 0
