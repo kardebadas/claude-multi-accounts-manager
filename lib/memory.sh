@@ -156,3 +156,46 @@ slug_is_eligible() {
   fi
   return 0
 }
+
+# project_memory_store -> shared/project-memory under the active managed root.
+# shared_dir follows multi_root on every call, including a caller-owned staging
+# root used to assemble first-run state before one outer atomic publication.
+project_memory_store() {
+  printf '%s\n' "$(shared_dir)/project-memory"
+}
+
+# seed_project_memory <main_folder>
+# Copy eligible existing project memories into the active root. This function
+# composes within the caller's root (which may be a validated staging root); it
+# never publishes or renames the managed root itself. Narration is stderr-only.
+seed_project_memory() {
+  local main="${1:?seed_project_memory: main folder required}"
+  local dest src slug seeded=0
+  dest="$(project_memory_store)"
+  mkdir -p "$dest"
+
+  while IFS= read -r slug; do
+    if [[ -z $slug ]]; then
+      continue
+    fi
+    src="$main/projects/$slug/memory"
+    if [[ ! -d $src ]]; then
+      continue
+    fi
+    if [[ -e "$dest/$slug" ]]; then
+      continue
+    fi
+    if ! slug_is_eligible "$slug"; then
+      continue
+    fi
+    mkdir -p "$dest/$slug"
+    cp -a "$src/." "$dest/$slug/"
+    log "project-memory: seeded $slug"
+    seeded=$((seeded + 1))
+  done < <(project_slugs "$main")
+
+  if (( seeded > 0 )); then
+    log "project-memory: seeded $seeded project memory folder(s)"
+  fi
+  return 0
+}
