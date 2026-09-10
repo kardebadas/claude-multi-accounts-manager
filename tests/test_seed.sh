@@ -330,6 +330,280 @@ test_seed_skips_an_absent_settings_json() {
   rm -rf "$tmp"
 }
 
+make_observing_awk_stub() {
+  local path="$1"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ -e "$SEED_OBSERVED_TARGET" || -L "$SEED_OBSERVED_TARGET" ]]; then exit 97; fi' \
+    'exec "$SEED_REAL_AWK" "$@"' > "$path"
+  chmod +x "$path"
+}
+
+make_failing_awk_stub() {
+  local path="$1"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$path"
+  chmod +x "$path"
+}
+
+make_signalling_awk_stub() {
+  local path="$1"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'kill -s "$SEED_SIGNAL" "$PPID"' \
+    'exit 1' > "$path"
+  chmod +x "$path"
+}
+
+test_seed_leaves_main_and_resolved_skills_source_unchanged() {
+  local tmp main shared source_before source_after skills_before skills_after
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  source_before=$(snapshot_tree "$main")
+  skills_before=$(snapshot_tree "$tmp/.codex-skills")
+
+  seed_shared "$main" "$shared"
+
+  source_after=$(snapshot_tree "$main")
+  skills_after=$(snapshot_tree "$tmp/.codex-skills")
+  assert_eq "$source_before" "$source_after" "seeding must not change main bytes or mtimes"
+  assert_eq "$skills_before" "$skills_after" "seeding must not change resolved skills bytes or mtimes"
+  rm -rf "$tmp"
+}
+
+test_seed_refuses_a_second_seed_and_preserves_live_edits() {
+  local tmp main shared err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  seed_shared "$main" "$shared"
+  printf '%s\n' 'hand-edited' > "$shared/CLAUDE.md"
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "a second seed must fail"
+  assert_contains "$err" "re-seed" "second-seed refusal must explain the policy"
+  assert_eq "hand-edited" "$(cat "$shared/CLAUDE.md")" "refusal must preserve live edits"
+  rm -rf "$tmp"
+}
+
+test_seed_rejects_equal_source_and_destination_before_writes() {
+  local tmp main before after err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  before=$(snapshot_tree "$main")
+
+  set +e
+  err=$(seed_shared "$main" "$main" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  after=$(snapshot_tree "$main")
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "equal source and destination must fail"
+  assert_contains "$err" "overlap" "equal paths must report containment"
+  assert_eq "$before" "$after" "equal-path refusal must happen before writes"
+  rm -rf "$tmp"
+}
+
+test_seed_rejects_source_nested_under_destination_before_writes() {
+  local tmp container main before after err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; container="$tmp/container"
+  mkdir -p "$container"
+  main=$(make_fixture_main "$container")
+  before=$(snapshot_tree "$container")
+
+  set +e
+  err=$(seed_shared "$main" "$container" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  after=$(snapshot_tree "$container")
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "source below destination must fail"
+  assert_contains "$err" "overlap" "source containment must be reported"
+  assert_eq "$before" "$after" "source containment refusal must happen before writes"
+  rm -rf "$tmp"
+}
+
+test_seed_rejects_destination_nested_under_source_before_writes() {
+  local tmp main shared before after err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$main/generated/shared"
+  before=$(snapshot_tree "$main")
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  after=$(snapshot_tree "$main")
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "destination below source must fail"
+  assert_contains "$err" "overlap" "destination containment must be reported"
+  assert_eq "$before" "$after" "destination containment refusal must happen before writes"
+  rm -rf "$tmp"
+}
+
+test_seed_rejects_destination_nested_under_resolved_skills_source() {
+  local tmp main skills shared before after err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  skills="$tmp/.codex-skills"; shared="$skills/generated/shared"
+  before=$(snapshot_tree "$skills")
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  after=$(snapshot_tree "$skills")
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" \
+    "destination below resolved skills source must fail"
+  assert_contains "$err" "overlap" "resolved skills containment must be reported"
+  assert_eq "$before" "$after" "resolved skills containment refusal must happen before writes"
+  rm -rf "$tmp"
+}
+
+test_seed_refuses_any_preexisting_live_target() {
+  local tmp main shared err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$tmp/publish/shared"
+  mkdir -p "$shared"
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "even an empty live target must be refused"
+  assert_contains "$err" "re-seed" "pre-existing target refusal must explain the policy"
+  assert_eq "0" "$(find "$shared" -mindepth 1 | wc -l | tr -d ' ')" "empty target must remain untouched"
+  rm -rf "$tmp"
+}
+
+test_seed_refuses_a_preexisting_live_multi_root() {
+  local tmp main root shared err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  root=$(multi_root); shared="$root/shared"
+  mkdir -p "$root"
+  printf '%s\n' keep > "$root/sentinel"
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "a pre-existing live root must be refused"
+  assert_contains "$err" "re-seed" "live-root refusal must explain the policy"
+  assert_eq "absent" "$(kind "$shared")" "live-root refusal must not create shared"
+  assert_eq "keep" "$(cat "$root/sentinel")" "live-root refusal must preserve existing content"
+  rm -rf "$tmp"
+}
+
+test_seed_refuses_a_dangling_live_target_symlink() {
+  local tmp main shared before err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$tmp/publish/shared"
+  mkdir -p "$(dirname "$shared")"
+  ln -s "$tmp/missing-target" "$shared"
+  before=$(readlink "$shared")
+
+  set +e
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "dangling live target must be refused"
+  assert_contains "$err" "re-seed" "dangling target refusal must explain the policy"
+  assert_eq "$before" "$(readlink "$shared")" "dangling target must remain untouched"
+  rm -rf "$tmp"
+}
+
+test_seed_keeps_target_invisible_until_complete_atomic_publish() {
+  local tmp main root parent shared stub real_awk stage_pattern
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  root=$(multi_root); parent=$(dirname "$root"); shared="$root/shared"; stub="$tmp/stub"
+  stage_pattern=".$(basename "$root").seed.*"
+  mkdir -p "$stub"
+  real_awk=$(command -v awk)
+  make_observing_awk_stub "$stub/awk"
+
+  (
+    export PATH="$stub:$PATH"
+    export SEED_REAL_AWK="$real_awk"
+    export SEED_OBSERVED_TARGET="$root"
+    seed_shared "$main" "$shared"
+  )
+
+  assert_eq "dir" "$(kind "$root")" "complete live root is published at once"
+  assert_eq "file" "$(kind "$shared/CLAUDE.md")" "published tree contains CLAUDE.md"
+  assert_eq "file" "$(kind "$shared/settings.json")" "published tree contains rewritten settings"
+  assert_eq "file" "$(kind "$shared/hooks/post-commit-practices.sh")" "published tree contains hook target"
+  assert_eq "0" "$(find "$parent" -maxdepth 1 -name "$stage_pattern" | wc -l | tr -d ' ')" \
+    "successful publication leaves no sibling staging directory"
+  rm -rf "$tmp"
+}
+
+test_seed_failure_cleans_only_its_validated_staging_directory() {
+  local tmp main root root_base parent shared stub lookalike rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  root=$(multi_root); root_base=$(basename "$root"); parent=$(dirname "$root")
+  shared="$root/shared"; stub="$tmp/stub"; lookalike="$parent/.$root_base.seed.keep"
+  mkdir -p "$lookalike" "$stub"
+  printf '%s\n' keep > "$lookalike/sentinel"
+  make_failing_awk_stub "$stub/awk"
+
+  set +e
+  PATH="$stub:$PATH" seed_shared "$main" "$shared" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "build failure must propagate"
+  assert_eq "absent" "$(kind "$root")" "failure must not expose a partial live root"
+  assert_eq "file" "$(kind "$lookalike/sentinel")" "lookalike sibling must survive cleanup"
+  assert_eq "0" "$(find "$parent" -maxdepth 1 -name ".$root_base.seed.*" ! -name ".$root_base.seed.keep" | wc -l | tr -d ' ')" \
+    "failure must remove its own staging directory"
+  rm -rf "$tmp"
+}
+
+test_seed_signals_clean_staging_without_exposing_the_target() {
+  local tmp main parent stub signal shared rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  parent="$tmp/publish"; stub="$tmp/stub"
+  mkdir -p "$parent" "$stub"
+  make_signalling_awk_stub "$stub/awk"
+
+  for signal in INT TERM; do
+    shared="$parent/shared-$signal"
+    set +e
+    (
+      export PATH="$stub:$PATH"
+      export SEED_SIGNAL="$signal"
+      seed_shared "$main" "$shared"
+    ) >/dev/null 2>&1
+    rc=$?
+    set -e
+
+    assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" "$signal must interrupt seeding"
+    assert_eq "absent" "$(kind "$shared")" "$signal must not expose a partial target"
+    assert_eq "0" "$(find "$parent" -maxdepth 1 -name ".shared-$signal.seed.*" | wc -l | tr -d ' ')" \
+      "$signal must clean its staging directory"
+  done
+  rm -rf "$tmp"
+}
+
+test_seed_shared_composes_inside_an_existing_multi_root_stage() {
+  local tmp main root_stage shared
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  root_stage="$tmp/.claude-multi.stage.example"; shared="$root_stage/shared"
+  mkdir -p "$root_stage/project-memory"
+  printf '%s\n' keep > "$root_stage/project-memory/sentinel"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "file" "$(kind "$shared/CLAUDE.md")" "shared subtree publishes inside caller stage"
+  assert_eq "keep" "$(cat "$root_stage/project-memory/sentinel")" \
+    "publishing shared must preserve caller-owned staged siblings"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
