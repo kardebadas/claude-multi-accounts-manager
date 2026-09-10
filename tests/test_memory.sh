@@ -503,6 +503,76 @@ t_seed_project_memory_survives_a_main_folder_with_no_projects() {
   cleanup_memory_fixture
 }
 
+t_memory_link_path_follows_the_active_root() {
+  make_memory_fixture
+  local slug="${FIX_REAL_SLUGS[0]}" err="$FIX_BASE/link-path.err" path
+
+  path="$(memory_link_path work "$slug" 2>"$err")"
+  assert_eq "$FIX_ROOT/work/projects/$slug/memory" "$path" \
+    "the account memory link uses the planned account project layout"
+  assert_eq "" "$(cat "$err")" "memory_link_path emits no diagnostics"
+
+  local stage="$FIX_BASE/.claude-multi.stage.example"
+  export CLAUDE_MULTI_ROOT="$stage"
+  assert_eq "$stage/work/projects/$slug/memory" \
+    "$(memory_link_path work "$slug")" \
+    "the link path composes through a caller-owned staging root"
+  cleanup_memory_fixture
+}
+
+t_memory_link_target_resolves_to_the_project_store() {
+  make_memory_fixture
+  local slug="${FIX_REAL_SLUGS[0]}" link target store
+  link="$(memory_link_path work "$slug")"
+  target="$(memory_link_target "$slug")"
+  store="$(project_memory_store)/$slug"
+  mkdir -p "$(dirname "$link")" "$store"
+  printf 'linked memory\n' > "$store/MEMORY.md"
+  ln -s "$target" "$link"
+
+  assert_link "$link" "$target"
+  assert_eq "yes" "$(yesno test -d "$link")" \
+    "the relative link resolves to an existing project-memory directory"
+  assert_eq "linked memory" "$(cat "$link/MEMORY.md")" \
+    "the resolved link exposes the stored project memory"
+  assert_eq "$(readlink -f "$store")" "$(readlink -f "$link")" \
+    "the planned link depth resolves to the project-memory store"
+  assert_eq "no" "$(yesno test "${target:0:1}" = /)" \
+    "the stored symlink target is relative"
+  cleanup_memory_fixture
+}
+
+t_memory_link_target_depth_is_three() {
+  make_memory_fixture
+  local slug="${FIX_REAL_SLUGS[0]}" err="$FIX_BASE/link-target.err" target
+  target="$(memory_link_target "$slug" 2>"$err")"
+  assert_eq "../../../shared/project-memory/$slug" "$target" \
+    "the account project memory link climbs exactly three levels"
+  assert_eq "" "$(cat "$err")" "memory_link_target emits no diagnostics"
+  cleanup_memory_fixture
+}
+
+t_memory_link_depth_matches_the_planned_layout() {
+  make_memory_fixture
+  local slug="${FIX_REAL_SLUGS[0]}" link cursor derived="" depth=0
+  link="$(memory_link_path work "$slug")"
+  cursor="${link%/*}"
+  while [[ "$cursor" != "$FIX_ROOT" && "$cursor" != / && $depth -lt 10 ]]; do
+    cursor="${cursor%/*}"
+    derived+="../"
+    depth=$((depth + 1))
+  done
+
+  assert_eq "$FIX_ROOT" "$cursor" \
+    "the link directory descends from the active managed root"
+  assert_eq "3" "$depth" \
+    "the link directory is independently three levels below the root"
+  assert_eq "${derived}shared/project-memory/$slug" \
+    "$(memory_link_target "$slug")" \
+    "the relative target depth follows the link and store layouts"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0
