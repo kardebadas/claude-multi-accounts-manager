@@ -217,6 +217,46 @@ test_link_verify_reports_real_file_for_a_real_directory() {
     "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")"
 }
 
+test_link_verify_reports_dangling_when_the_shared_target_is_absent() {
+  new_fixture
+  rm -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_eq "dangling" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md")" \
+    "correct link text plus a missing target is dangling, not ok"
+}
+
+# THE regression. `cp -a ~/.claude/skills shared/` copies the link TEXT
+# `../.codex-skills`, which inside shared/ resolves to <root>/.codex-skills.
+# That path does not exist, so <account>/skills -> ../shared/skills dangles
+# even though both hops are spelled exactly as expected.
+test_link_verify_never_reports_ok_for_the_cp_a_copied_skills_chain() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  ln -s "../.codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
+  assert_absent "$CLAUDE_MULTI_ROOT/.codex-skills"
+  link_create "$CLAUDE_MULTI_ROOT/personal/skills" "../shared/skills"
+  assert_eq "dangling" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/skills" "../shared/skills")" \
+    "a dangling skills chain must never report green"
+}
+
+# Byte-exact, and it says exactly what it measures. `ok` + "\n" = 3 bytes.
+# A command substitution CANNOT express this claim: it strips trailing
+# newlines, so `printf 'ok\n\n\n'` would pass. The bytes are therefore counted
+# inside the pipe, where every byte survives.
+#
+# assert_stdout_empty_bytes is deliberately NOT used here: link_verify's stdout
+# is not empty and must not be — the status word is its return value. That
+# assertion is for the flow functions (Tasks 2, 3, 7-11).
+test_link_verify_stdout_is_exactly_the_status_word_and_one_newline() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/hooks" "../shared/hooks"
+  assert_eq "3" \
+    "$( { link_verify "$CLAUDE_MULTI_ROOT/personal/hooks" "../shared/hooks" 2>/dev/null || true; } | wc -c | tr -d '[:space:]')" \
+    "stdout is exactly the status word plus one newline — no banner, no padding"
+}
+
 test_link_verify_reports_ok_for_a_correct_resolving_link() {
   new_fixture
   link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
@@ -282,6 +322,9 @@ run_test test_link_verify_reports_wrong_target_for_a_misaimed_link
 run_test test_link_verify_reports_wrong_target_for_an_absolute_link_where_relative_is_expected
 run_test test_link_verify_reports_real_file_for_a_clobbered_settings_json
 run_test test_link_verify_reports_real_file_for_a_real_directory
+run_test test_link_verify_reports_dangling_when_the_shared_target_is_absent
+run_test test_link_verify_never_reports_ok_for_the_cp_a_copied_skills_chain
+run_test test_link_verify_stdout_is_exactly_the_status_word_and_one_newline
 run_test test_link_verify_reports_ok_for_a_correct_resolving_link
 run_test test_link_verify_reports_ok_for_a_directory_link
 run_test test_link_verify_reports_missing_when_nothing_is_there
