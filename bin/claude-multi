@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# claude-multi — manage multiple Claude Code accounts by pointing
+# CLAUDE_CONFIG_DIR at a per-account config folder.
+#
+# Executable AND source-able: the main guard at the bottom means the test suite
+# can source this file and call functions directly.
+#
+# stdout belongs to claude. Every diagnostic here goes to stderr, so
+# `claude-multi work -p "…" | jq` is never corrupted.
+set -euo pipefail
+
+CLAUDE_MULTI_PROG="claude-multi"
+CLAUDE_MULTI_VERSION="0.1.0"
+
+# Resolve this script through any chain of symlinks, so lib/ is still found
+# when invoked via the ~/.local/bin/claude-multi link that install.sh creates.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _link="$(readlink -- "$_self")"
+  case "$_link" in
+    /*) _self="$_link" ;;
+    *) _self="$(dirname -- "$_self")/$_link" ;;
+  esac
+done
+CLAUDE_MULTI_LIB="$(cd -- "$(dirname -- "$_self")/../lib" && pwd)"
+unset _self _link
+
+# shellcheck source=../lib/config.sh
+source "$CLAUDE_MULTI_LIB/config.sh"
+# shellcheck source=../lib/util.sh
+source "$CLAUDE_MULTI_LIB/util.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  claude-multi                    interactive account menu
+  claude-multi <account> [args…]  launch claude in <account>; args pass through
+
+  --help, -h   this message
+  --version    print the version
+
+There are no subcommands: add / delete / sync / doctor live inside the menu, so
+`claude-multi add` always means "launch the account named add".
+
+All claude-multi output goes to stderr; stdout belongs to claude.
+USAGE
+}
+
+# dispatch_args [args…]
+dispatch_args() {
+  if (($# == 0)); then
+    # Phase 6 replaces this with menu_loop.
+    log "menu is not implemented yet"
+    return 0
+  fi
+
+  case "$1" in
+    --help | -h)
+      usage
+      return 0
+      ;;
+    --version)
+      printf '%s %s\n' "$CLAUDE_MULTI_PROG" "$CLAUDE_MULTI_VERSION" >&2
+      return 0
+      ;;
+  esac
+
+  if ! validate_name "$1"; then
+    return 1
+  fi
+  shift
+
+  # Phase 6 replaces this with heal_account + launch_account "$name" "$@".
+  log "launching '$CANONICAL_NAME' is not implemented yet ($# extra args)"
+  return 0
+}
+
+main() {
+  require_bash4 || return 1
+  local root=""
+  root="$(multi_root)"
+  validate_root_path "$root" || return 1
+  dispatch_args "$@"
+}
+
+# main guard: run only when executed, not when sourced by the tests.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

@@ -23,6 +23,7 @@ source "$REPO_ROOT/tests/assert.sh"
 source "$REPO_ROOT/lib/util.sh"
 
 UTIL_SH="$REPO_ROOT/lib/util.sh"
+CLI_BIN="$REPO_ROOT/bin/claude-multi"
 
 # ── the message prefix ───────────────────────────────────────────────────────
 
@@ -259,13 +260,18 @@ test_require_bash4_accepts_a_normal_major() {
 # statically — the file must contain no construct that bash 3 cannot parse.
 
 test_util_sh_uses_no_bash4_only_syntax() {
-  local pattern desc found
-  # pattern<TAB>description
-  while IFS=$'\t' read -r pattern desc; do
-    [[ -n "$pattern" ]] || continue
-    found="$(grep -nE -- "$pattern" "$UTIL_SH" || true)"
-    assert_eq "" "$found" "lib/util.sh must not use $desc (bash 4+ only)"
-  done <<'PATTERNS'
+  local target pattern desc found
+  for target in "$UTIL_SH" "$CLI_BIN"; do
+    if [[ ! -f "$target" ]]; then
+      printf '  FAIL: compatibility scan target does not exist: %s\n' "$target" >&2
+      return 1
+    fi
+    # pattern<TAB>description
+    while IFS=$'\t' read -r pattern desc; do
+      [[ -n "$pattern" ]] || continue
+      found="$(grep -nE -- "$pattern" "$target" || true)"
+      assert_eq "" "$found" "${target#"$REPO_ROOT/"} must not use $desc (bash 4+ only)"
+    done <<'PATTERNS'
 (declare|local|typeset)[[:space:]]+-[A-Za-z]*A	associative arrays
 \$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(\^|,,|,)	case modification ${v^^} / ${v,,}
 (^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)	mapfile/readarray/coproc
@@ -275,6 +281,7 @@ test_util_sh_uses_no_bash4_only_syntax() {
 \[\[[[:space:]]+-v[[:space:]]	[[ -v var ]]
 \$\{[A-Za-z_][A-Za-z_0-9]*\[-[0-9]	negative array indices
 PATTERNS
+  done
 }
 
 test_util_sh_parses() {
