@@ -573,6 +573,96 @@ t_memory_link_depth_matches_the_planned_layout() {
   cleanup_memory_fixture
 }
 
+# Helper: a seeded store plus an empty account directory.
+fix_seed_and_account() {
+  local account="$1"
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  mkdir -p "$FIX_ROOT/$account"
+}
+
+t_store_slugs_lists_seeded_slugs() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  local actual expected
+  actual="$(store_slugs | sort)"
+  expected="$(printf '%s\n' "${FIX_REAL_SLUGS[@]}" | sort)"
+  assert_eq "$expected" "$actual" \
+    "store_slugs lists exactly the seeded slugs, one per line"
+  assert_eq "11" "$(store_slugs | wc -l | tr -d ' ')" \
+    "store_slugs lists one line per seeded slug"
+  cleanup_memory_fixture
+}
+
+t_sync_creates_a_working_link_per_seeded_slug() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  sync_project_memory personal 2>/dev/null
+
+  local slug link
+  for slug in "${FIX_REAL_SLUGS[@]}"; do
+    link="$(memory_link_path personal "$slug")"
+    assert_link "$link" "$(memory_link_target "$slug")"
+    assert_eq "yes" "$(yesno test -d "$link")" \
+      "link for $slug must resolve to a directory"
+    assert_eq "memory for $slug" "$(cat "$link/MEMORY.md")" \
+      "content is readable through the link for $slug"
+  done
+  cleanup_memory_fixture
+}
+
+t_sync_creates_no_link_for_worktree_slugs() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  sync_project_memory personal 2>/dev/null
+  local slug
+  for slug in "${FIX_WORKTREE_SLUGS[@]}"; do
+    assert_eq "no" "$(yesno test -e "$FIX_ROOT/personal/projects/$slug")" \
+      "worktree slug must get no project dir in the account: $slug"
+  done
+  cleanup_memory_fixture
+}
+
+t_sync_is_independent_per_account() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  mkdir -p "$FIX_ROOT/work"
+  sync_project_memory personal 2>/dev/null
+  sync_project_memory work 2>/dev/null
+  local slug
+  slug="${FIX_REAL_SLUGS[0]}"
+  assert_link "$(memory_link_path personal "$slug")" "$(memory_link_target "$slug")"
+  assert_link "$(memory_link_path work "$slug")" "$(memory_link_target "$slug")"
+  cleanup_memory_fixture
+}
+
+t_sync_writes_nothing_to_stdout() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  assert_stdout_empty_bytes sync_project_memory personal
+  cleanup_memory_fixture
+}
+
+t_sync_refuses_an_unknown_account_without_exiting() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  local err
+  assert_fails sync_project_memory no-such-account
+  err="$(sync_project_memory no-such-account 2>&1 >/dev/null || true)"
+  assert_contains "$err" "no such account" \
+    "the refusal must be narrated on stderr"
+  assert_eq "yes" "$(yesno test -d "$FIX_ROOT/personal")" \
+    "the refusal must not have torn anything down"
+  cleanup_memory_fixture
+}
+
+t_sync_is_a_noop_when_the_store_is_empty() {
+  make_memory_fixture
+  mkdir -p "$FIX_ROOT/personal"
+  assert_eq "yes" "$(yesno sync_project_memory personal)" \
+    "an unseeded store must exit 0, not abort the caller under set -e"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0

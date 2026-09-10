@@ -217,3 +217,68 @@ seed_project_memory() {
   fi
   return 0
 }
+
+# store_slugs -> one seeded slug per stdout line.
+store_slugs() {
+  local store d
+  store="$(project_memory_store)"
+  if [[ ! -d "$store" ]]; then
+    return 0
+  fi
+  for d in "$store"/*/; do
+    if [[ ! -d "$d" ]]; then
+      continue
+    fi
+    d="${d%/}"
+    printf '%s\n' "${d##*/}"
+  done
+}
+
+# sync_project_memory <account>
+# Create each account project-memory link from the active shared store.
+# Zero bytes on stdout; missing accounts are refused without exiting the caller.
+sync_project_memory() {
+  local account="${1:?sync_project_memory: account required}"
+  local account_path slug link target linked=0
+  account_path="$(account_dir "$account")"
+  if [[ ! -d "$account_path" ]]; then
+    warn "sync_project_memory: no such account: $account"
+    return 1
+  fi
+
+  while IFS= read -r slug; do
+    if [[ -z $slug ]]; then
+      continue
+    fi
+    link="$(memory_link_path "$account" "$slug")"
+    target="$(memory_link_target "$slug")"
+    if _memory_link_sync_one "$link" "$target" "$account/$slug"; then
+      linked=$((linked + 1))
+    fi
+  done < <(store_slugs)
+
+  if (( linked > 0 )); then
+    log "project-memory: $account — $linked link(s) created or repaired"
+  fi
+  return 0
+}
+
+# _memory_link_sync_one <link> <target> <label>
+# 0 = created or repaired (and narrated), 1 = already correct (silent).
+# Task 9 adds lossless handling for real content and dangling-link repair.
+_memory_link_sync_one() {
+  local link="$1" target="$2" label="$3"
+  mkdir -p "$(dirname "$link")"
+  if [[ -L "$link" ]]; then
+    if [[ "$(readlink "$link")" == "$target" ]]; then
+      return 1
+    fi
+    rm -f "$link"
+    ln -s "$target" "$link"
+    warn "project-memory: repointed $label"
+    return 0
+  fi
+  ln -s "$target" "$link"
+  log "project-memory: linked $label"
+  return 0
+}
