@@ -604,6 +604,50 @@ test_seed_shared_composes_inside_an_existing_multi_root_stage() {
   rm -rf "$tmp"
 }
 
+test_entry_point_sources_the_complete_seed_interface_without_output() {
+  local tmp out_file err_file rc
+  new_sandbox; tmp="$SANDBOX_TMP"
+  out_file="$tmp/source.stdout"; err_file="$tmp/source.stderr"
+
+  set +e
+  bash -c '
+    set -euo pipefail
+    source "$1/bin/claude-multi"
+    for fn in validate_main_folder seed_shared seed_skills_link rewrite_hook_paths; do
+      declare -F "$fn" >/dev/null || exit 23
+    done
+  ' _ "$repo" >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "entry point must expose the complete seed interface"
+  assert_eq "0" "$(wc -c < "$out_file" | tr -d ' ')" "sourcing entry point must keep stdout byte-empty"
+  assert_eq "0" "$(wc -c < "$err_file" | tr -d ' ')" "sourcing entry point must keep stderr byte-empty"
+  rm -rf "$tmp"
+}
+
+test_entry_point_seed_interface_runs_a_complete_seed() {
+  local tmp main shared out_file err_file rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  out_file="$tmp/seed.stdout"; err_file="$tmp/seed.stderr"
+
+  set +e
+  bash -c '
+    set -euo pipefail
+    source "$1/bin/claude-multi"
+    seed_shared "$2" "$3"
+  ' _ "$repo" "$main" "$shared" >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "seed interface sourced by entry point must be callable"
+  assert_eq "file" "$(kind "$shared/CLAUDE.md")" "entry-point seed publishes complete shared content"
+  assert_eq "link" "$(kind "$shared/skills")" "entry-point seed has the link_create dependency"
+  assert_eq "0" "$(wc -c < "$out_file" | tr -d ' ')" "entry-point seed keeps stdout byte-empty"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
