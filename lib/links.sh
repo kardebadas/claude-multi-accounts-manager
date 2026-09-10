@@ -154,3 +154,31 @@ link_repair() {
   esac
   return 0
 }
+
+# heal_account <account>
+# FLOW. Verify + repair every expected link for one account. Narrates only
+# changes, to stderr; stdout stays byte-empty. 0 = everything is ok now,
+# 1 = at least one item is unrepairable. One bad item never aborts the pass.
+#
+# link_verify is read through $( ) — that is its return channel, and this is
+# the call site that breaks silently if anyone redirects it to stderr.
+heal_account() {
+  local account="$1" path target status rc=0
+  while IFS=$'\t' read -r path target; do
+    status="$(link_verify "$path" "$target")"
+    if [[ "$status" == "ok" ]]; then
+      continue
+    fi
+    if ! link_repair "$path" "$target" "$status" rel; then
+      rc=1
+      continue
+    fi
+    status="$(link_verify "$path" "$target")"
+    if [[ "$status" != "ok" ]]; then
+      if ! link_repair "$path" "$target" "$status" rel; then
+        rc=1
+      fi
+    fi
+  done < <(expected_links "$account")
+  return "$rc"
+}

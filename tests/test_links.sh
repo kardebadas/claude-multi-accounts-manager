@@ -450,6 +450,92 @@ test_link_repair_dangling_stdout_is_byte_empty() {
   assert_stdout_empty_bytes link_repair "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" dangling
 }
 
+test_heal_account_creates_every_link_from_scratch() {
+  new_fixture
+  heal_account personal
+  local item
+  # Driven off the table's NAMES and account_link_target — never off a raw
+  # shared_items row, whose fields are joined with `|`.
+  while IFS= read -r item; do
+    if [[ -z "$item" ]]; then continue; fi
+    assert_link "$CLAUDE_MULTI_ROOT/personal/$item" "$(account_link_target "$item")"
+  done < <(shared_item_names)
+}
+
+test_heal_account_links_every_item_in_the_table() {
+  new_fixture
+  heal_account personal
+  local count
+  count="$(find "$CLAUDE_MULTI_ROOT/personal" -maxdepth 1 -type l | wc -l | tr -d '[:space:]')"
+  assert_eq "$(item_count)" "$count" "one link per table entry, no extras"
+}
+
+test_heal_account_is_silent_and_zero_when_everything_is_ok() {
+  new_fixture
+  heal_account personal
+  local err
+  err="$(heal_account personal 2>&1 >/dev/null)"
+  assert_eq "" "$err" "a no-op heal narrates nothing at all"
+}
+
+test_heal_account_stdout_is_byte_empty() {
+  new_fixture
+  # Byte-exact: Phase 6 calls heal_account immediately before `exec claude`,
+  # so a single newline here corrupts `claude-multi work -p "…" | jq`.
+  assert_stdout_empty_bytes heal_account personal
+  # assert_no_stdout as well, purely for its failure message: it names the
+  # leaked text, which the byte counter cannot. It is an addition to the
+  # byte-exact check, never a substitute for it.
+  new_fixture
+  assert_no_stdout heal_account personal
+}
+
+test_heal_account_repairs_a_mixed_bag_in_one_pass() {
+  new_fixture
+  ln -sfn "../shared/agent-memory" "$CLAUDE_MULTI_ROOT/personal/agents"   # wrong-target
+  printf '{"permissions":{"allow":["Bash(git:*)"]}}\n' \
+    > "$CLAUDE_MULTI_ROOT/personal/settings.json"                          # real-file
+  heal_account personal
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/settings.json.bak.*)
+  assert_present "${backups[0]}"
+  assert_contains "$(cat "${backups[0]}")" "Bash(git:*)" \
+    "heal never discards a clobbered settings.json"
+}
+
+test_heal_account_fails_loudly_on_the_dangling_skills_chain() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  ln -s "../.codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
+  assert_fails heal_account personal
+  local err
+  err="$(heal_account personal 2>&1 >/dev/null || true)"
+  assert_contains "$err" "dangling"
+  assert_contains "$err" "skills"
+}
+
+test_heal_account_still_repairs_other_items_when_one_is_unrepairable() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  ln -s "../.codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
+  assert_fails heal_account personal
+  assert_link "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" \
+    "one bad item does not abort the rest of the heal"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json"
+}
+
+test_heal_account_is_idempotent() {
+  new_fixture
+  heal_account personal
+  heal_account personal
+  heal_account personal
+  # No backup was created, so the glob does not match and stays literal.
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/*.bak.*)
+  assert_absent "${backups[0]}"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -504,6 +590,14 @@ run_test test_link_repair_refuses_a_dangling_link_and_fabricates_nothing
 run_test test_link_repair_dangling_never_creates_an_empty_skills_dir
 run_test test_link_repair_dangling_explains_the_broken_chain_on_stderr
 run_test test_link_repair_dangling_stdout_is_byte_empty
+run_test test_heal_account_creates_every_link_from_scratch
+run_test test_heal_account_links_every_item_in_the_table
+run_test test_heal_account_is_silent_and_zero_when_everything_is_ok
+run_test test_heal_account_stdout_is_byte_empty
+run_test test_heal_account_repairs_a_mixed_bag_in_one_pass
+run_test test_heal_account_fails_loudly_on_the_dangling_skills_chain
+run_test test_heal_account_still_repairs_other_items_when_one_is_unrepairable
+run_test test_heal_account_is_idempotent
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while
