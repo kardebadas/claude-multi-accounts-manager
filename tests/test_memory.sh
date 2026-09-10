@@ -413,6 +413,96 @@ t_slug_is_eligible_accepts_wt_dashboard_component() {
   cleanup_memory_fixture
 }
 
+t_project_memory_store_follows_the_staging_root_override() {
+  make_memory_fixture
+  local live_store="$FIX_ROOT/shared/project-memory"
+  local stage="$FIX_BASE/.claude-multi.stage.example"
+  mkdir -p "$stage"
+  printf 'keep\n' > "$stage/sentinel"
+  export CLAUDE_MULTI_ROOT="$stage"
+
+  assert_eq "$stage/shared/project-memory" "$(project_memory_store)" \
+    "the store composes through the caller's root override"
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+
+  assert_eq "yes" "$(yesno test -f "$stage/shared/project-memory/${FIX_REAL_SLUGS[0]}/MEMORY.md")" \
+    "project memory is assembled inside the caller-owned root stage"
+  assert_eq "no" "$(yesno test -e "$live_store")" \
+    "project-memory seeding must not independently publish live state"
+  assert_eq "keep" "$(cat "$stage/sentinel")" \
+    "seeding preserves caller-owned staged siblings"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_copies_eligible_slugs_only() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+
+  local dest="$FIX_ROOT/shared/project-memory" slug
+  for slug in "${FIX_REAL_SLUGS[@]}"; do
+    assert_eq "yes" "$(yesno test -f "$dest/$slug/MEMORY.md")" \
+      "eligible slug must be seeded: $slug"
+    assert_eq "memory for $slug" "$(cat "$dest/$slug/MEMORY.md")" \
+      "seeded content must match the source"
+  done
+  for slug in "${FIX_WORKTREE_SLUGS[@]}"; do
+    assert_eq "no" "$(yesno test -e "$dest/$slug")" \
+      "worktree slug must not be seeded despite carrying source memory: $slug"
+  done
+  assert_eq "no" "$(yesno test -e "$dest/$(fix_slug gone/project)")" \
+    "a slug whose decoded path is gone must not be seeded"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_seeds_exactly_the_real_count() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  local n
+  n="$(find "$FIX_ROOT/shared/project-memory" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  assert_eq "11" "$n" "exactly the 11 eligible slugs are seeded"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_leaves_the_main_folder_untouched() {
+  make_memory_fixture
+  local before after
+  before="$(cd "$FIX_MAIN" && find . -printf '%p %s %T@\n' | sort | cksum)"
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  after="$(cd "$FIX_MAIN" && find . -printf '%p %s %T@\n' | sort | cksum)"
+  assert_eq "$before" "$after" "the main folder remains read-only"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_is_silent_and_inert_on_rerun() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  local snap1 snap2 err
+  snap1="$(cd "$FIX_ROOT/shared/project-memory" && find . -printf '%p %y %s %T@\n' | sort | cksum)"
+  err="$(seed_project_memory "$FIX_MAIN" 2>&1 >/dev/null)"
+  snap2="$(cd "$FIX_ROOT/shared/project-memory" && find . -printf '%p %y %s %T@\n' | sort | cksum)"
+  assert_eq "$snap1" "$snap2" "a repeated seed changes nothing"
+  assert_eq "" "$err" "a repeated seed reports nothing"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_writes_nothing_to_stdout() {
+  make_memory_fixture
+  local out="$FIX_BASE/seed.out" rc=0
+  seed_project_memory "$FIX_MAIN" >"$out" 2>/dev/null || rc=$?
+  assert_eq "0" "$rc" "seeding succeeds while stdout is captured"
+  assert_eq "0" "$(wc -c < "$out" | tr -d ' ')" \
+    "seeding writes zero bytes to stdout"
+  cleanup_memory_fixture
+}
+
+t_seed_project_memory_survives_a_main_folder_with_no_projects() {
+  make_memory_fixture
+  mkdir -p "$FIX_BASE/bare-main"
+  assert_eq "yes" "$(yesno seed_project_memory "$FIX_BASE/bare-main")" \
+    "an absent projects directory exits successfully"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0
