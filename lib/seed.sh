@@ -113,3 +113,39 @@ seed_shared() {
 
   return 0
 }
+
+# Copy settings.json, rewriting every "<main>/hooks/" prefix to "<shared>/hooks/".
+# jq is NOT an allowed dependency, so this is a pure text transform. awk does
+# literal index()/substr() replacement — no regex, so paths containing spaces,
+# dots, brackets or other metacharacters need no escaping. Values arrive through
+# ENVIRON rather than -v, because -v applies backslash-escape processing.
+rewrite_hook_paths() {
+  local src="$1" dst="$2" main="$3" shared="$4"
+  local from="${main%/}/hooks/" to="${shared%/}/hooks/"
+  local tmp="$dst.tmp.$$"
+
+  if ! SEED_FROM="$from" SEED_TO="$to" awk '
+    BEGIN { from = ENVIRON["SEED_FROM"]; to = ENVIRON["SEED_TO"] }
+    {
+      line = $0; out = ""
+      while ((p = index(line, from)) > 0) {
+        out = out substr(line, 1, p - 1) to
+        line = substr(line, p + length(from))
+      }
+      print out line
+    }
+  ' "$src" > "$tmp"; then
+    rm -f "$tmp"
+    warn "settings.json: hook path rewrite failed ($src)"
+    return 1
+  fi
+
+  # Anything still pointing into the main folder would be executed from the
+  # read-only source. Report it loudly; it is a config shape we have not seen.
+  if grep -qF "${main%/}/" "$tmp"; then
+    warn "settings.json: still references the main folder after rewrite: ${main%/}"
+  fi
+
+  mv "$tmp" "$dst"
+  return 0
+}

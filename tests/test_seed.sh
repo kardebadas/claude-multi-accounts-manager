@@ -207,6 +207,61 @@ test_seed_copies_skills_when_the_source_is_a_real_directory() {
   rm -rf "$tmp"
 }
 
+# Verified fact: the real settings.json hook command is an absolute path into the
+# main folder. Left alone, every managed account would EXECUTE code out of the
+# folder the spec calls read-only. jq is not an allowed dependency -> awk.
+test_rewrite_moves_the_hook_command_into_shared_hooks() {
+  local tmp main shared out; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"; mkdir -p "$shared"
+
+  rewrite_hook_paths "$main/settings.json" "$shared/settings.json" "$main" "$shared"
+  out=$(cat "$shared/settings.json")
+
+  assert_contains "$out" "\"command\": \"$shared/hooks/post-commit-practices.sh\"" \
+    "hook command must point into shared/hooks"
+  assert_eq "no" "$(grep -qF "$main/hooks/" "$shared/settings.json" && printf yes || printf no)" \
+    "no hook path may still point into the main folder"
+  rm -rf "$tmp"
+}
+
+test_rewrite_preserves_everything_else_including_the_work_profile() {
+  local tmp main shared out; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"; mkdir -p "$shared"
+
+  rewrite_hook_paths "$main/settings.json" "$shared/settings.json" "$main" "$shared"
+  out=$(cat "$shared/settings.json")
+
+  assert_contains "$out" '"model": "opus[1m]"'              "model preserved"
+  assert_contains "$out" '"environment": "work-profile"'    "autoMode profile preserved"
+  assert_contains "$out" '"matcher": "Bash"'                "matcher preserved"
+  assert_eq "$(wc -l < "$main/settings.json")" "$(wc -l < "$shared/settings.json")" \
+    "line count unchanged — a transform, not a reformat"
+  rm -rf "$tmp"
+}
+
+test_rewrite_leaves_the_source_settings_untouched() {
+  local tmp main shared before after; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"; mkdir -p "$shared"
+  before=$(md5sum < "$main/settings.json")
+
+  rewrite_hook_paths "$main/settings.json" "$shared/settings.json" "$main" "$shared"
+
+  after=$(md5sum < "$main/settings.json")
+  assert_eq "$before" "$after" "source settings.json must not change"
+  rm -rf "$tmp"
+}
+
+test_rewrite_writes_no_temp_file_behind() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"; mkdir -p "$shared"
+
+  rewrite_hook_paths "$main/settings.json" "$shared/settings.json" "$main" "$shared"
+
+  assert_eq "0" "$(find "$shared" -maxdepth 1 -name 'settings.json.tmp*' | wc -l | tr -d ' ')" \
+    "temp file must be renamed away"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
