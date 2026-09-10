@@ -410,6 +410,46 @@ test_link_repair_backup_stdout_is_byte_empty() {
   assert_stdout_empty_bytes link_repair "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json" real-file
 }
 
+test_link_repair_refuses_a_dangling_link_and_fabricates_nothing() {
+  new_fixture
+  rm -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_fails link_repair "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" dangling
+  assert_link "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_absent "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+}
+
+test_link_repair_dangling_never_creates_an_empty_skills_dir() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  ln -s "../.codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
+  link_create "$CLAUDE_MULTI_ROOT/personal/skills" "../shared/skills"
+  assert_fails link_repair "$CLAUDE_MULTI_ROOT/personal/skills" "../shared/skills" dangling
+  assert_absent "$CLAUDE_MULTI_ROOT/.codex-skills"
+  assert_link "$CLAUDE_MULTI_ROOT/shared/skills" "../.codex-skills" \
+    "the broken shared-side link is reported, not rewritten — seeding owns it"
+}
+
+test_link_repair_dangling_explains_the_broken_chain_on_stderr() {
+  new_fixture
+  rm -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  local err
+  err="$(link_repair "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" dangling 2>&1 >/dev/null || true)"
+  assert_contains "$err" "dangling"
+  assert_contains "$err" "CLAUDE.md"
+  assert_contains "$err" "target missing" "the refusal explains why relinking cannot repair the chain"
+}
+
+test_link_repair_dangling_stdout_is_byte_empty() {
+  new_fixture
+  rm -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  # assert_stdout_empty_bytes ignores the command's exit status by design, so
+  # no `|| true` is needed for a call that legitimately returns 1.
+  assert_stdout_empty_bytes link_repair "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" dangling
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -460,6 +500,10 @@ run_test test_path_has_content_sees_dotfiles_in_a_directory
 run_test test_path_has_content_is_false_for_empty_paths
 run_test test_path_has_content_prints_nothing_anywhere
 run_test test_link_repair_backup_stdout_is_byte_empty
+run_test test_link_repair_refuses_a_dangling_link_and_fabricates_nothing
+run_test test_link_repair_dangling_never_creates_an_empty_skills_dir
+run_test test_link_repair_dangling_explains_the_broken_chain_on_stderr
+run_test test_link_repair_dangling_stdout_is_byte_empty
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while

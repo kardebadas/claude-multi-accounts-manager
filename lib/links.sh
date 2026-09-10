@@ -140,6 +140,13 @@ link_repair() {
       link_create "$path" "$target" "$kind" || return 1
       warn "replaced real path with link: $path -> $target"
       ;;
+    dangling)
+      # The link text is right; the target is gone. Relinking would change
+      # nothing and creating the target would fabricate config that was lost.
+      # Report loudly and let seeding fix the shared side.
+      warn "dangling link: $path -> $(readlink "$path") (target missing; re-seed shared/)"
+      return 1
+      ;;
     *)
       warn "link_repair: unknown status '$status' for $path"
       return 1
