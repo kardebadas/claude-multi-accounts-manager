@@ -321,6 +321,93 @@ t_decode_slug_returns_4_when_capped() {
   cleanup_memory_fixture
 }
 
+t_project_slugs_lists_main_folder_slugs() {
+  make_memory_fixture
+  local n listing expected
+  printf 'not a directory\n' > "$FIX_MAIN/projects/ordinary-file"
+  n="$(project_slugs "$FIX_MAIN" | wc -l | tr -d ' ')"
+  assert_eq "30" "$n" "list all project directories, excluding files"
+  listing="$(project_slugs "$FIX_MAIN")"
+  # The directory-only glob sorts paths with their trailing slash intact.
+  expected="$(printf '%s/\n' "${FIX_REAL_SLUGS[@]}" "${FIX_WORKTREE_SLUGS[@]}" \
+    "$(fix_slug projects/gamma)-nomem" "$(fix_slug gone/project)" | sort | sed 's:/$::')"
+  assert_eq "$expected" "$listing" "list every slug in shell glob order"
+  cleanup_memory_fixture
+}
+
+t_project_slugs_is_quiet_when_projects_dir_absent() {
+  make_memory_fixture
+  local out
+  out="$(project_slugs "$FIX_BASE/no-such-main")"
+  assert_eq "" "$out" "a missing projects directory yields no output"
+  assert_eq "yes" "$(yesno project_slugs "$FIX_BASE/no-such-main")" \
+    "a missing projects directory must exit 0"
+  assert_stdout_empty_bytes project_slugs "$FIX_BASE/no-such-main"
+  mkdir -p "$FIX_BASE/empty-main/projects"
+  assert_eq "" "$(project_slugs "$FIX_BASE/empty-main")" \
+    "an empty projects directory must not print an unmatched glob"
+  cleanup_memory_fixture
+}
+
+t_slug_is_eligible_accepts_all_real_slugs() {
+  make_memory_fixture
+  local slug
+  for slug in "${FIX_REAL_SLUGS[@]}"; do
+    assert_eq "yes" "$(yesno slug_is_eligible "$slug")" \
+      "real slug must be eligible: $slug"
+  done
+  assert_stdout_empty_bytes slug_is_eligible "${FIX_REAL_SLUGS[0]}"
+  cleanup_memory_fixture
+}
+
+t_slug_is_eligible_rejects_every_worktree_slug() {
+  make_memory_fixture
+  local slug rc
+  for slug in "${FIX_WORKTREE_SLUGS[@]}"; do
+    rc=0
+    slug_is_eligible "$slug" >"$FIX_BASE/eligible.out" 2>"$FIX_BASE/eligible.err" || rc=$?
+    assert_eq "1" "$rc" "worktree slug must be rejected: $slug"
+    assert_eq "" "$(cat "$FIX_BASE/eligible.out")" "worktree predicate has no stdout"
+  done
+  rc=0
+  MEMORY_DECODE_MAX_NODES=1 slug_is_eligible "${FIX_WORKTREE_SLUGS[0]}" \
+    >"$FIX_BASE/eligible.out" 2>"$FIX_BASE/eligible.err" || rc=$?
+  assert_eq "1" "$rc" "worktree rejection is independent of decode budget"
+  assert_eq "" "$(cat "$FIX_BASE/eligible.err")" \
+    "worktree rejection precedes decoding, so no search cap warning occurs"
+  assert_stdout_empty_bytes slug_is_eligible "${FIX_WORKTREE_SLUGS[0]}"
+  cleanup_memory_fixture
+}
+
+t_slug_is_eligible_rejects_gone_and_ambiguous() {
+  make_memory_fixture
+  local rel rc slug
+  for rel in gone/project amb/a-b; do
+    slug="$(fix_slug "$rel")"
+    rc=0
+    slug_is_eligible "$slug" >/dev/null 2>"$FIX_BASE/eligible.err" || rc=$?
+    assert_eq "1" "$rc" "gone or ambiguous project must be rejected: $rel"
+    assert_stdout_empty_bytes slug_is_eligible "$slug"
+  done
+  assert_contains "$(cat "$FIX_BASE/eligible.err")" "ambiguous" \
+    "eligibility preserves decoder diagnostics on stderr"
+  rc=0
+  MEMORY_DECODE_MAX_NODES=1 slug_is_eligible "${FIX_REAL_SLUGS[0]}" \
+    >/dev/null 2>"$FIX_BASE/eligible.err" || rc=$?
+  assert_eq "1" "$rc" "a capped decode is ineligible"
+  MEMORY_DECODE_MAX_NODES=1 assert_stdout_empty_bytes slug_is_eligible "${FIX_REAL_SLUGS[0]}"
+  cleanup_memory_fixture
+}
+
+t_slug_is_eligible_rejects_the_wt_false_positive() {
+  make_memory_fixture
+  local rc=0
+  # The lexical '-wt-' rule also skips this real project's slug.
+  slug_is_eligible "$(fix_slug projects/wt-dashboard)" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "the documented -wt- false positive is skipped"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0

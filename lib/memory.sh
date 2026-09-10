@@ -124,3 +124,31 @@ decode_slug() {
   printf '%s\n' "${_DECODE_RESULTS[0]}"
   return 0
 }
+
+# project_slugs <main_folder> -> one directory slug per stdout line.
+project_slugs() {
+  local main="${1:?project_slugs: main folder required}" d
+  if [[ ! -d "$main/projects" ]]; then
+    return 0
+  fi
+  for d in "$main"/projects/*/; do
+    if [[ ! -d $d ]]; then
+      continue
+    fi
+    d="${d%/}"
+    printf '%s\n' "${d##*/}"
+  done
+}
+
+# slug_is_eligible <slug> -> 0 when its memory may be shared, otherwise 1.
+# This predicate returns only status; decoder diagnostics remain on stderr.
+slug_is_eligible() {
+  local slug="${1:?slug_is_eligible: slug required}"
+  if is_worktree_slug "$slug"; then
+    return 1
+  fi
+  if ! decode_slug "$slug" >/dev/null; then
+    return 1
+  fi
+  return 0
+}
