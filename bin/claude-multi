@@ -29,6 +29,10 @@ unset _self _link
 source "$CLAUDE_MULTI_LIB/config.sh"
 # shellcheck source=../lib/util.sh
 source "$CLAUDE_MULTI_LIB/util.sh"
+# shellcheck source=../lib/links.sh
+source "$CLAUDE_MULTI_LIB/links.sh"
+# shellcheck source=../lib/seed.sh
+source "$CLAUDE_MULTI_LIB/seed.sh"
 
 usage() {
   cat >&2 <<'USAGE'
