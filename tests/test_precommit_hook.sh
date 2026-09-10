@@ -332,6 +332,27 @@ t_install_refuses_a_hookspath_outside_the_repo() {
     "--force must not write outside the repository either"
 }
 
+# F-005: lexical containment is insufficient when an in-repo path component is
+# a symlink. Git follows this redirect, but the installer must not follow it out
+# of the repository and create an externally located pre-commit hook.
+t_install_refuses_a_symlinked_hookspath_that_resolves_outside() {
+  new_repo
+  local outside out
+  outside="$(mktemp -d "$TEST_TMP/outside.XXXXXX")"
+  ln -s -- "$outside" .githooks
+  git config core.hooksPath .githooks
+
+  assert_fails install
+  out="$(install_err)"
+  assert_contains "$out" "core.hooksPath" "the refusal must name the setting"
+  assert_eq "" "$(find "$outside" -mindepth 1)" \
+    "a symlinked hooks path must not escape the repository"
+  # --force only authorises replacing a foreign hook, never path escape.
+  assert_fails install --force
+  assert_eq "" "$(find "$outside" -mindepth 1)" \
+    "--force must not follow a symlinked hooks path outside either"
+}
+
 # ── invocation errors ────────────────────────────────────────────────────────
 t_install_outside_a_repository_is_explained() {
   local bare
