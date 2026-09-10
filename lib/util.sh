@@ -93,3 +93,146 @@ require_bash4() {
   fi
   return 0
 }
+
+# ── confirm: yes/no prompting that must survive having no terminal ───────────
+# Two functions, split so the accept/reject table is testable without faking a
+# terminal:
+#   _confirm_reply <reply> <default>   pure parser, no I/O at all
+#   confirm <prompt> [default]         renders the prompt, reads the answer
+# Both return 0 for yes and 1 for no. Neither returns data, so neither writes
+# to stdout: the prompt, the hint and every notice go to stderr, and stdout
+# stays byte-empty so `claude-multi work -p "…" | jq` is never corrupted.
+#
+# ── what the answer is when nobody answers ───────────────────────────────────
+# Four cases, and later phases depend on all four:
+#
+#   * No terminal for the exchange — stdin is not a tty, or stderr is not one:
+#     confirm takes the caller's default WITHOUT READING A BYTE OF STDIN and
+#     says so on stderr. BOTH CHANNELS MUST BE USABLE, because the answer is
+#     read from stdin and the question is shown on stderr (stdout belongs to
+#     claude); with either one redirected there is no exchange to have, and
+#     `claude-multi … 2>log` would otherwise print an invisible prompt into the
+#     log and then sit there looking hung. Not reading is the other half of the
+#     point: that stdin may be claude's own input, so a prompt that helped
+#     itself to a line would corrupt the process we are about to exec, and
+#     piped data must never be able to answer a question on the operator's
+#     behalf.
+#   * EOF at the prompt (Ctrl-D on a real terminal) with nothing typed: the
+#     same branch as an empty line, i.e. the caller's default. EOF IS NOT
+#     CONSENT — it can only ever produce "yes" for a caller that explicitly
+#     asked for a Y default. EOF ON A PARTIALLY TYPED LINE HONOURS WHAT WAS
+#     TYPED, though: `read` fails at EOF but leaves the partial line behind,
+#     and an operator who typed "n" before pressing Ctrl-D has refused — a
+#     default of Y must never overrule them.
+#   * A blank-looking answer: empty, or NOTHING BUT WHITESPACE IS NO ANSWER, so
+#     the caller's default applies. The operator has just read the hint, and a
+#     stray space before Return must not hand them the opposite of what it
+#     advertised. (A space stuck to an answer, "y ", is a different thing: a
+#     typo in an answer, and still no.)
+#   * Default omitted, or anything other than Y/y/N/n: N, plus a `warn` naming
+#     the value whenever one was actually supplied. Silence is never consent,
+#     and neither is a default the caller got wrong; a bad default fails
+#     closed, and says so, because the verdict channel is binary and code
+#     could not otherwise tell "the operator said no" from "you passed me
+#     junk". A warning and not a `die`: see the contract above — a caller must
+#     be able to carry on past a bad prompt argument.
+#
+# A TYPED answer may be y, Y, yes or YES; everything else — n, no, "yep" — is
+# no. A yes/no gate that guesses is a gate that consents by accident, so there
+# is no re-prompt loop: an unrecognised answer is simply no, and the caller can
+# ask again if it wants to.
+#
+# The DEFAULT, by contrast, means "yes" for Y/y and nothing else, because the
+# hint the operator saw and the answer actually taken are decided by the same
+# test — they cannot drift apart and show [Y/n] while assuming N.
+#
+# ── what this is not ─────────────────────────────────────────────────────────
+# confirm is for ordinary yes/no questions ("launch claude in 'work' now to log
+# in? [Y/n]"). It is NOT THE DELETION GATE. An irreversible removal must make
+# the operator retype the account name — the typed-name confirmation on the
+# delete path — because a single keystroke is far too cheap for an `rm -rf`,
+# and because the no-terminal branch above deliberately answers with no human
+# present. Never front an irreversible action with confirm alone.
+_confirm_reply() {
+  local reply default
+  reply="${1-}"
+  default="${2-}"
+
+  # Nobody answered: empty, or a line carrying no non-whitespace character at
+  # all. Both take the caller's default. `*[![:space:]]*` is bash-3 glob
+  # syntax, like the rest of this file, and it deliberately still rejects "y "
+  # — a space attached to an answer is a typo in an answer, not a blank line.
+  case "$reply" in
+    *[![:space:]]*) ;;
+    *)
+      case "$default" in
+        [Yy]) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+
+  case "$reply" in
+    [Yy] | [Yy][Ee][Ss]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# confirm <prompt> [default]  — default is Y or N (N when omitted). 0 = yes.
+#
+# Every branch hands the verdict to _confirm_reply through an explicit
+# if/else rather than `return $?`: under a caller's errexit, a bare
+# `_confirm_reply …` that returns 1 would abort the caller before this function
+# could turn it into its own return value.
+confirm() {
+  local prompt default hint reply
+  prompt="${1-}"
+  default="${2-}"
+  hint="[y/N]"
+  reply=""
+
+  # Normalise first, so the notices below report what will actually happen.
+  case "$default" in
+    [Yy]) default="Y"; hint="[Y/n]" ;;
+    [Nn]) default="N" ;;
+    *)
+      # Only a default that was actually SUPPLIED is reported: omitting it is
+      # the documented way to ask for N, and warning about that would put a
+      # spurious line in front of every well-behaved caller.
+      if [ "$#" -ge 2 ]; then
+        warn "confirm: unrecognised default [$default]; using N"
+      fi
+      default="N"
+      ;;
+  esac
+
+  # Both channels, or no exchange: stdin to read the answer from and stderr to
+  # show the question on. Checked before any read, so this branch consumes
+  # nothing.
+  if [ ! -t 0 ] || [ ! -t 2 ]; then
+    log "$prompt $hint (no terminal; assuming $default)"
+    if _confirm_reply "" "$default"; then return 0; else return 1; fi
+  fi
+
+  printf '%s: %s %s ' "$CLAUDE_MULTI_PROG" "$prompt" "$hint" >&2
+  if ! IFS= read -r reply; then
+    # Close the prompt line the terminal left open, then decide what the failed
+    # read actually means.
+    printf '\n' >&2
+    case "$reply" in
+      *[![:space:]]*)
+        # The line was typed but never terminated — Ctrl-D on a partial line.
+        # `read` reports failure and still hands back what was typed, and that
+        # answer wins: discarding it would turn a typed refusal into whatever
+        # the caller happened to pass as its default.
+        if _confirm_reply "$reply" "$default"; then return 0; else return 1; fi
+        ;;
+    esac
+    # Nothing was typed. A default taken in silence is indistinguishable from
+    # an answered question, so say which one was taken and why.
+    warn "no answer (EOF); assuming $default"
+    if _confirm_reply "" "$default"; then return 0; else return 1; fi
+  fi
+
+  if _confirm_reply "$reply" "$default"; then return 0; else return 1; fi
+}
