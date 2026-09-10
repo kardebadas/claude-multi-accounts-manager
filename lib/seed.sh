@@ -49,7 +49,7 @@ seed_shared() {
 
   validate_main_folder "$main" || return 1
 
-  mkdir -p "$shared" "$shared/plugin-cache"
+  mkdir -p "$shared" "$shared/commands" "$shared/plugin-cache"
 
   if [[ -f "$main/CLAUDE.md" ]]; then
     cp -p "$main/CLAUDE.md" "$shared/CLAUDE.md"
@@ -69,6 +69,15 @@ seed_shared() {
       log "skipped $d/ (absent in $main)"
     fi
   done
+
+  # Verified fact: the real ~/.claude has NO commands/ dir. Created empty above,
+  # so an absent source is a no-op instead of a `set -e` abort.
+  if [[ -d "$main/commands" ]]; then
+    cp -a "$main/commands/." "$shared/commands/"
+    log "seeded commands/"
+  else
+    log "created commands/ empty (absent in $main)"
+  fi
 
   return 0
 }

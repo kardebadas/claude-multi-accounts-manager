@@ -118,6 +118,49 @@ test_seed_rejects_an_invalid_main_folder() {
   rm -rf "$tmp"
 }
 
+# Verified fact: ~/.claude/commands does not exist. The naive loop
+#   for item in CLAUDE.md agents hooks agent-memory commands; do cp -a "$main/$item" …; done
+# makes `cp` exit 1 on the missing source, and `set -e` kills the whole run.
+test_seed_creates_commands_empty_when_the_source_is_absent() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  assert_eq "absent" "$(kind "$main/commands")" "fixture precondition: no source commands/"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "dir" "$(kind "$shared/commands")" "commands/ must be created"
+  assert_eq "0" "$(find "$shared/commands" -mindepth 1 | wc -l | tr -d ' ')" "commands/ must be empty"
+  # and the run must have reached the LAST item, not died at the missing one
+  assert_eq "dir" "$(kind "$shared/agent-memory")" "seeding continued past the missing source"
+  rm -rf "$tmp"
+}
+
+test_seed_copies_commands_when_the_source_exists() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  mkdir -p "$main/commands"
+  printf '# cmd\n' > "$main/commands/deploy.md"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "file" "$(kind "$shared/commands/deploy.md")" "existing commands/ contents copied"
+  rm -rf "$tmp"
+}
+
+test_seed_survives_a_main_folder_missing_most_sources() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"
+  main="$tmp/bare"; shared="$(multi_root)/shared"
+  mkdir -p "$main"
+  printf '{}\n' > "$main/settings.json"   # the only marker; no CLAUDE.md, no dirs
+
+  seed_shared "$main" "$shared"   # must exit 0 under set -e
+
+  assert_eq "absent" "$(kind "$shared/CLAUDE.md")" "absent CLAUDE.md simply skipped"
+  assert_eq "absent" "$(kind "$shared/agents")"    "absent agents/ simply skipped"
+  assert_eq "dir"    "$(kind "$shared/commands")"  "commands/ still created"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
