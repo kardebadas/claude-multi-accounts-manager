@@ -536,6 +536,105 @@ test_heal_account_is_idempotent() {
   assert_absent "${backups[0]}"
 }
 
+test_doctor_report_covers_every_item_of_the_named_account_on_stderr() {
+  new_fixture
+  heal_account personal
+  local err
+  err="$(doctor_report personal 2>&1 >/dev/null || true)"
+  assert_contains "$err" "personal"
+  assert_contains "$err" "settings.json"
+  assert_contains "$err" "skills"
+  assert_contains "$err" "ok"
+}
+
+test_doctor_report_reports_each_account_it_is_given() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/work"
+  heal_account personal
+  local err
+  err="$(doctor_report personal work 2>&1 >/dev/null || true)"
+  assert_contains "$err" "personal"
+  assert_contains "$err" "work"
+  assert_contains "$err" "missing"   # work has no links yet
+}
+
+test_doctor_report_reports_only_the_accounts_it_is_given() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/work"
+  heal_account personal
+  local err
+  err="$(doctor_report personal 2>&1 >/dev/null || true)"
+  assert_contains "$err" "personal"
+  assert_eq "0" "$(printf '%s\n' "$err" | grep -c 'work' || true)" \
+    "only the named account is reported — enumeration is list_accounts' job"
+}
+
+test_doctor_report_stdout_is_byte_empty() {
+  new_fixture
+  heal_account personal
+  assert_stdout_empty_bytes doctor_report personal
+}
+
+test_doctor_report_fails_when_anything_is_not_ok() {
+  new_fixture
+  assert_fails doctor_report personal
+}
+
+test_doctor_report_passes_when_the_account_is_healed() {
+  new_fixture
+  heal_account personal
+  doctor_report personal
+}
+
+test_doctor_report_repairs_nothing() {
+  new_fixture
+  printf 'local override\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  doctor_report personal || true
+  assert_absent "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" \
+    "doctor diagnoses; sync repairs"
+  assert_eq "local override" "$(cat "$CLAUDE_MULTI_ROOT/personal/settings.json")" \
+    "doctor neither relinks nor backs up a real file"
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/*.bak.*)
+  assert_absent "${backups[0]}"
+}
+
+test_doctor_report_flags_the_dangling_skills_chain() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  ln -s "../.codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
+  heal_account personal || true
+  local err
+  err="$(doctor_report personal 2>&1 >/dev/null || true)"
+  assert_contains "$err" "dangling"
+  assert_fails doctor_report personal
+}
+
+test_doctor_report_refuses_zero_arguments() {
+  new_fixture
+  # No implicit "all accounts": this phase owns no enumerator.
+  assert_fails doctor_report
+  local err
+  err="$(doctor_report 2>&1 >/dev/null || true)"
+  assert_contains "$err" "account" "the refusal says it needs an account name"
+}
+
+test_doctor_report_refuses_a_reserved_directory() {
+  new_fixture
+  assert_fails doctor_report shared
+  local err
+  err="$(doctor_report shared 2>&1 >/dev/null || true)"
+  assert_contains "$err" "shared" "shared/ is not an account"
+}
+
+test_doctor_report_refuses_an_unknown_account() {
+  new_fixture
+  assert_fails doctor_report nosuch
+  local err
+  err="$(doctor_report nosuch 2>&1 >/dev/null || true)"
+  assert_contains "$err" "nosuch"
+  assert_absent "$CLAUDE_MULTI_ROOT/nosuch"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -598,6 +697,17 @@ run_test test_heal_account_repairs_a_mixed_bag_in_one_pass
 run_test test_heal_account_fails_loudly_on_the_dangling_skills_chain
 run_test test_heal_account_still_repairs_other_items_when_one_is_unrepairable
 run_test test_heal_account_is_idempotent
+run_test test_doctor_report_covers_every_item_of_the_named_account_on_stderr
+run_test test_doctor_report_reports_each_account_it_is_given
+run_test test_doctor_report_reports_only_the_accounts_it_is_given
+run_test test_doctor_report_stdout_is_byte_empty
+run_test test_doctor_report_fails_when_anything_is_not_ok
+run_test test_doctor_report_passes_when_the_account_is_healed
+run_test test_doctor_report_repairs_nothing
+run_test test_doctor_report_flags_the_dangling_skills_chain
+run_test test_doctor_report_refuses_zero_arguments
+run_test test_doctor_report_refuses_a_reserved_directory
+run_test test_doctor_report_refuses_an_unknown_account
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while

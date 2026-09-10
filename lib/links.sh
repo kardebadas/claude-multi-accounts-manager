@@ -182,3 +182,41 @@ heal_account() {
   done < <(expected_links "$account")
   return "$rc"
 }
+
+# doctor_report <account> [account...]
+# FLOW. Read-only per-item status for each named account. Repairs NOTHING —
+# doctor diagnoses, sync (heal_account) repairs. Every line goes to stderr.
+# 0 = every item of every named account is ok, 1 = something needs attention.
+#
+# It takes names as arguments and deliberately does NOT enumerate accounts:
+# lib/accounts.sh's list_accounts is the project's single enumerator, and a
+# second directory walk here diverged from it on hidden directories. A caller
+# that wants them all does:
+#   mapfile -t accts < <(list_accounts); doctor_report "${accts[@]}"
+doctor_report() {
+  local account path target status rc=0 root
+  if (( $# == 0 )); then
+    warn "doctor: needs at least one account name (use list_accounts to enumerate)"
+    return 1
+  fi
+  root="$(multi_root)"
+  for account in "$@"; do
+    if is_reserved_name "$account"; then
+      warn "doctor: $account is a reserved directory, not an account"
+      rc=1
+      continue
+    fi
+    if [[ ! -d "$root/$account" ]]; then
+      warn "doctor: no such account: $account"
+      rc=1
+      continue
+    fi
+    log "$account"
+    while IFS=$'\t' read -r path target; do
+      status="$(link_verify "$path" "$target")"
+      if [[ "$status" != "ok" ]]; then rc=1; fi
+      log "$(printf '  %-14s %s' "${path##*/}" "$status")"
+    done < <(expected_links "$account")
+  done
+  return "$rc"
+}
