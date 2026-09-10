@@ -236,3 +236,56 @@ confirm() {
 
   if _confirm_reply "$reply" "$default"; then return 0; else return 1; fi
 }
+
+# Result of the last validate_name call. Empty means "no valid name".
+CANONICAL_NAME=""
+
+# validate_name <raw>
+# 0 and CANONICAL_NAME set, or 1 with a stderr message and CANONICAL_NAME="".
+#
+# The name is returned through a global rather than printed, because an
+# uncaptured $(validate_name …) would put the name on claude's stdout.
+#
+# Requires is_reserved_name from lib/config.sh.
+validate_name() {
+  local raw="${1-}" name="" upper lower upper_char lower_char i
+  CANONICAL_NAME=""
+
+  if [[ -z "$raw" ]]; then
+    warn "an account name is required"
+    return 1
+  fi
+
+  # Checked before lowercasing so the message names the real problem.
+  if [[ "$raw" == .* ]]; then
+    warn "account names may not start with '.': $raw"
+    return 1
+  fi
+
+  name="$raw"
+  if [[ "$name" =~ [A-Z] ]]; then
+    # Keep this library parseable by bash 3 so require_bash4 can report its
+    # own useful error instead of the source operation failing first.
+    upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lower="abcdefghijklmnopqrstuvwxyz"
+    for ((i = 0; i < 26; i++)); do
+      upper_char="${upper:$i:1}"
+      lower_char="${lower:$i:1}"
+      name="${name//$upper_char/$lower_char}"
+    done
+    warn "account names are lowercase; using '$name'"
+  fi
+
+  if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
+    warn "invalid account name '$raw': must match ^[a-z0-9][a-z0-9-]{0,31}\$"
+    return 1
+  fi
+
+  if is_reserved_name "$name"; then
+    warn "'$name' is a reserved name and cannot be an account"
+    return 1
+  fi
+
+  CANONICAL_NAME="$name"
+  return 0
+}
