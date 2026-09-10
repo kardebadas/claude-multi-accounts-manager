@@ -64,3 +64,29 @@ link_create() {
   mkdir -p "$(dirname "$path")"
   ln -sfn "$target" "$path"
 }
+
+# link_verify <path> <expected-target>
+# DATA PRODUCER. Prints one status word to stdout:
+#   ok | missing | wrong-target | real-file | dangling
+# Always returns 0 — the word is the answer. NEVER redirect these printfs to
+# stderr: they are this function's return value.
+#
+# The -L test comes first: `-e` follows a symlink, so a healthy link would
+# otherwise be misread as a real file.
+link_verify() {
+  local path="$1" expected="$2" actual
+  if [[ -L "$path" ]]; then
+    actual="$(readlink "$path")"
+    if [[ "$actual" != "$expected" ]]; then
+      printf 'wrong-target\n'
+    elif [[ -e "$path" ]]; then
+      printf 'ok\n'
+    else
+      printf 'dangling\n'
+    fi
+  elif [[ -e "$path" ]]; then
+    printf 'real-file\n'
+  else
+    printf 'missing\n'
+  fi
+}

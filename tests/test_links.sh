@@ -187,6 +187,42 @@ test_link_create_abs_stdout_is_byte_empty() {
   assert_stdout_empty_bytes link_create "$CLAUDE_MULTI_ROOT/shared/skills" "$FIXTURE_TMP/codex-skills" abs
 }
 
+test_link_verify_reports_ok_for_a_correct_resolving_link() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_eq "ok" "$(link_verify "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md")"
+}
+
+test_link_verify_reports_ok_for_a_directory_link() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  assert_eq "ok" "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")"
+}
+
+test_link_verify_reports_missing_when_nothing_is_there() {
+  new_fixture
+  assert_eq "missing" "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")"
+}
+
+test_link_verify_always_returns_zero_whatever_the_status() {
+  new_fixture
+  # The status is the return VALUE; the exit code carries no information, so
+  # heal_account can call it under `set -e` without a guard.
+  link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" >/dev/null
+}
+
+# C3 pin: link_verify is a DATA PRODUCER. A later "purge stdout from lib/" pass
+# must not add >&2 to these printfs. With stderr discarded the status must
+# still arrive on stdout — otherwise every `status="$(link_verify …)"` becomes
+# the empty string, heal_account repairs nothing, and it still exits 0.
+test_link_verify_returns_the_status_on_stdout_not_stderr() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_eq "ok" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md" 2>/dev/null)" \
+    "with stderr discarded the status still arrives — it is a stdout return value"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -212,6 +248,11 @@ run_test test_link_create_abs_points_shared_skills_at_the_resolved_codex_dir
 run_test test_link_create_abs_rejects_a_relative_target
 run_test test_link_create_rejects_an_unknown_kind
 run_test test_link_create_abs_stdout_is_byte_empty
+run_test test_link_verify_reports_ok_for_a_correct_resolving_link
+run_test test_link_verify_reports_ok_for_a_directory_link
+run_test test_link_verify_reports_missing_when_nothing_is_there
+run_test test_link_verify_always_returns_zero_whatever_the_status
+run_test test_link_verify_returns_the_status_on_stdout_not_stderr
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while
