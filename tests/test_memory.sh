@@ -21,6 +21,81 @@ slug_oracle() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'
 }
 
+FIX_REAL_RELPATHS=(
+  "projects/alpha-service" "projects/beta-app" "projects/gamma"
+  "projects/delta-one-two-three" "projects/sigma-sigma-notes"
+  "projects/epsilon_notes" "projects/two words" "projects/theta.tools"
+  "projects/zeta" "projects/zeta/scripts/env-provisioning" "scratch/notes"
+)
+FIX_WORKTREE_RELPATHS=(
+  "projects/alpha-service/.claude/worktrees/agent-one"
+  "projects/alpha-service/.claude/worktrees/agent-two"
+  "projects/beta-app/.claude/worktrees/agent-three"
+  "projects/beta-app/.claude/worktrees/agent-four"
+  "projects/beta-app/.claude/worktrees/agent-five"
+  "projects/gamma/.claude/worktrees/agent-six"
+  "projects/gamma/.claude/worktrees/agent-seven"
+  "projects/zeta/.claude/worktrees/agent-eight"
+  "projects/zeta/.claude/worktrees/agent-nine"
+  "projects/zeta/.claude/worktrees/agent-ten"
+  "projects/sigma-sigma-notes/.claude/worktrees/agent-eleven"
+  "projects/sigma-sigma-notes/.claude/worktrees/agent-twelve"
+  "projects/delta-one-two-three/.claude/worktrees/agent-thirteen"
+  "projects/delta-one-two-three/.claude/worktrees/task-migration"
+  "projects/theta.tools/.claude/worktrees/wt-p2-phase"
+  "wt/refactor-api" "projects/zeta/wt/spike-cache"
+)
+FIX_ADVERSARIAL_RELPATHS=(
+  "amb/a-b" "amb/a/b" "und/my-app" "und/my_app" "dot/.hidden-notes"
+  "projects/wt-dashboard"
+)
+
+fix_slug() { slug_of_path "$FIX_FS/$1"; }
+
+fix_base_charset() {
+  if [[ ${FIX_BASE:-} =~ ^[/A-Za-z0-9._\ -]+$ ]]; then
+    printf 'reconstructable\n'
+  else
+    printf 'unreconstructable\n'
+  fi
+}
+
+cleanup_memory_fixture() {
+  if [[ -n ${FIX_BASE:-} && -d ${FIX_BASE:-/nonexistent} ]]; then
+    rm -rf -- "$FIX_BASE"
+  fi
+}
+
+make_memory_fixture() {
+  FIX_BASE="$(mktemp -d "${TMPDIR:-/tmp}/cm-mem.XXXXXXXX")"
+  trap cleanup_memory_fixture EXIT
+  assert_eq "reconstructable" "$(fix_base_charset)" \
+    "fixture base must contain only reconstructable characters"
+  FIX_FS="$FIX_BASE/fs" FIX_MAIN="$FIX_BASE/main" FIX_ROOT="$FIX_BASE/root"
+  export CLAUDE_MULTI_ROOT="$FIX_ROOT"
+  local rel slug
+  FIX_REAL_SLUGS=()
+  for rel in "${FIX_REAL_RELPATHS[@]}"; do
+    mkdir -p "$FIX_FS/$rel"
+    FIX_REAL_SLUGS+=("$(fix_slug "$rel")")
+  done
+  FIX_WORKTREE_SLUGS=()
+  for rel in "${FIX_WORKTREE_RELPATHS[@]}"; do
+    mkdir -p "$FIX_FS/$rel"
+    FIX_WORKTREE_SLUGS+=("$(fix_slug "$rel")")
+  done
+  for rel in "${FIX_ADVERSARIAL_RELPATHS[@]}"; do mkdir -p "$FIX_FS/$rel"; done
+  mkdir -p "$FIX_MAIN/projects"
+  for slug in "${FIX_REAL_SLUGS[@]}" "${FIX_WORKTREE_SLUGS[@]}"; do
+    mkdir -p "$FIX_MAIN/projects/$slug/memory"
+    printf 'memory for %s\n' "$slug" > "$FIX_MAIN/projects/$slug/memory/MEMORY.md"
+  done
+  mkdir -p "$FIX_MAIN/projects/$(fix_slug projects/gamma)-nomem"
+  mkdir -p "$FIX_MAIN/projects/$(fix_slug gone/project)/memory"
+  printf 'stale\n' > "$FIX_MAIN/projects/$(fix_slug gone/project)/memory/MEMORY.md"
+  mkdir -p "$FIX_ROOT/shared"
+}
+
 t_slug_of_path_encodes_every_non_alphanumeric_byte() {
   local t base p s
   t="$(mktemp -d "${TMPDIR:-/tmp}/cm-slug.XXXXXXXX")"
@@ -74,6 +149,33 @@ t_is_worktree_slug_writes_nothing_at_all() {
   assert_eq "" "$(is_worktree_slug "$slug" 2>&1 >/dev/null || true)" \
     "a predicate must not narrate on stderr either"
   rm -rf -- "$t"
+}
+
+t_fixture_has_the_required_mix() {
+  make_memory_fixture
+  assert_eq "11" "${#FIX_REAL_SLUGS[@]}" "11 real project slugs"
+  assert_eq "17" "${#FIX_WORKTREE_SLUGS[@]}" "17 worktree slugs"
+  local slug
+  for slug in "${FIX_WORKTREE_SLUGS[@]}"; do
+    assert_eq "yes" "$(yesno is_worktree_slug "$slug")" "worktree detected: $slug"
+  done
+  for slug in "${FIX_REAL_SLUGS[@]}"; do
+    assert_eq "no" "$(yesno is_worktree_slug "$slug")" "real slug accepted: $slug"
+  done
+  cleanup_memory_fixture
+}
+
+t_fixture_paths_exist_on_disk_and_are_all_relative() {
+  make_memory_fixture
+  local rel
+  for rel in "${FIX_REAL_RELPATHS[@]}" "${FIX_WORKTREE_RELPATHS[@]}" \
+             "${FIX_ADVERSARIAL_RELPATHS[@]}"; do
+    assert_eq "yes" "$(yesno test -d "$FIX_FS/$rel")" "fixture path exists: $rel"
+    assert_eq "no" "$(yesno test "${rel:0:1}" = "/")" "fixture path is relative: $rel"
+  done
+  assert_eq "yes" "$(yesno test -f "$FIX_MAIN/projects/${FIX_REAL_SLUGS[0]}/memory/MEMORY.md")" \
+    "fixture main folder carries memory"
+  cleanup_memory_fixture
 }
 
 # Dispatch MUST remain the last block: later tasks append tests above it.
