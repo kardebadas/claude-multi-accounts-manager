@@ -293,6 +293,44 @@ test_link_verify_returns_the_status_on_stdout_not_stderr() {
     "with stderr discarded the status still arrives — it is a stdout return value"
 }
 
+test_link_repair_is_a_silent_noop_for_ok() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  local err
+  err="$(link_repair "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" ok 2>&1 >/dev/null)"
+  assert_eq "" "$err" "repairing an ok link narrates nothing"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+}
+
+test_link_repair_creates_a_missing_link() {
+  new_fixture
+  link_repair "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" missing
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  assert_is_dir "$CLAUDE_MULTI_ROOT/personal/agents"
+}
+
+test_link_repair_rewrites_a_wrong_target() {
+  new_fixture
+  ln -sfn "../shared/agent-memory" "$CLAUDE_MULTI_ROOT/personal/agents"
+  link_repair "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" wrong-target
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+}
+
+test_link_repair_narrates_to_stderr_and_keeps_stdout_byte_empty() {
+  new_fixture
+  assert_stdout_empty_bytes link_repair "$CLAUDE_MULTI_ROOT/personal/hooks" "../shared/hooks" missing
+  new_fixture
+  local err
+  err="$(link_repair "$CLAUDE_MULTI_ROOT/personal/hooks" "../shared/hooks" missing 2>&1 >/dev/null)"
+  assert_contains "$err" "hooks" "a repair says which path it fixed"
+}
+
+test_link_repair_rejects_an_unknown_status() {
+  new_fixture
+  assert_fails link_repair "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" bananas
+  assert_absent "$CLAUDE_MULTI_ROOT/personal/agents"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -330,6 +368,11 @@ run_test test_link_verify_reports_ok_for_a_directory_link
 run_test test_link_verify_reports_missing_when_nothing_is_there
 run_test test_link_verify_always_returns_zero_whatever_the_status
 run_test test_link_verify_returns_the_status_on_stdout_not_stderr
+run_test test_link_repair_is_a_silent_noop_for_ok
+run_test test_link_repair_creates_a_missing_link
+run_test test_link_repair_rewrites_a_wrong_target
+run_test test_link_repair_narrates_to_stderr_and_keeps_stdout_byte_empty
+run_test test_link_repair_rejects_an_unknown_status
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while

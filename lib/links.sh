@@ -90,3 +90,28 @@ link_verify() {
     printf 'missing\n'
   fi
 }
+
+# link_repair <path> <target> <status> [rel|abs]
+# FLOW. Acts on a status word from link_verify. 0 = the path is now correct,
+# 1 = it cannot be repaired here. Narration to stderr only; never exits.
+link_repair() {
+  local path="$1" target="$2" status="$3" kind="${4:-rel}"
+  case "$status" in
+    ok)
+      return 0
+      ;;
+    missing)
+      link_create "$path" "$target" "$kind" || return 1
+      warn "created link: $path -> $target"
+      ;;
+    wrong-target)
+      link_create "$path" "$target" "$kind" || return 1
+      warn "repaired link: $path -> $target"
+      ;;
+    *)
+      warn "link_repair: unknown status '$status' for $path"
+      return 1
+      ;;
+  esac
+  return 0
+}
