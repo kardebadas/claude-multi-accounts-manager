@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# lib/memory.sh — project-slug encoding and worktree-slug filtering.
+# lib/memory.sh — project-slug encoding, filtering, and reconstruction.
 #
 # This file is sourced by tests and later by the main command. The functions
-# below are lexical and filesystem-free; callers receive data on stdout only
-# from the data producer and no function emits status narration.
+# below emit data on stdout only from data producers. Reconstruction validates
+# candidates against directories on disk; encoding and filtering are lexical.
 
 WORKTREE_SLUG_PATTERNS=(
   '*--claude-worktrees-*'
@@ -26,4 +26,77 @@ is_worktree_slug() {
     fi
   done
   return 1
+}
+
+# Literal alternatives to a separator for each lossy '-' in a slug.
+MEMORY_LITERAL_CANDIDATES=('-' '.' '_' ' ')
+
+# Module-private search state; decode_slug is not reentrant.
+_DECODE_RESULTS=()
+_DECODE_COUNT=0
+
+# _decode_prefix_exists <dir> <prefix> -> whether an entry has this prefix.
+# Quoting the prefix keeps its characters literal while '*' extends it.
+_decode_prefix_exists() {
+  local dir="$1" prefix="$2" e
+  for e in "$dir"/"$prefix"*; do
+    if [[ -e $e || -L $e ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _decode_walk <confirmed_dir> <component_so_far> <remaining_slug_chars>
+# An empty confirmed_dir represents root. Results accumulate without output.
+_decode_walk() {
+  local dir="$1" comp="$2" rest="$3" ch lit
+
+  if [[ -z $rest ]]; then
+    if [[ -n $comp && -d "$dir/$comp" ]]; then
+      _DECODE_RESULTS+=("$dir/$comp")
+      _DECODE_COUNT=$(( _DECODE_COUNT + 1 ))
+    fi
+    return 0
+  fi
+
+  ch="${rest:0:1}"
+  rest="${rest:1}"
+  if [[ $ch != '-' ]]; then
+    _decode_walk "$dir" "$comp$ch" "$rest"
+    return 0
+  fi
+
+  # A separator can descend only into an existing directory.
+  if [[ -n $comp && -d "$dir/$comp" ]]; then
+    _decode_walk "$dir/$comp" "" "$rest"
+  fi
+
+  # A literal character must match an existing entry's prefix.
+  for lit in "${MEMORY_LITERAL_CANDIDATES[@]}"; do
+    if _decode_prefix_exists "$dir" "$comp$lit"; then
+      _decode_walk "$dir" "$comp$lit" "$rest"
+    fi
+  done
+  return 0
+}
+
+# decode_slug <slug> -> the single existing absolute directory, or exit 1.
+# Failure never prints a guessed candidate to stdout.
+decode_slug() {
+  local slug="${1:?decode_slug: slug required}"
+  _DECODE_RESULTS=()
+  _DECODE_COUNT=0
+
+  if [[ $slug != -* ]]; then
+    return 1
+  fi
+
+  # The first '-' encodes the leading '/'.
+  _decode_walk "" "" "${slug:1}"
+  if (( _DECODE_COUNT != 1 )); then
+    return 1
+  fi
+  printf '%s\n' "${_DECODE_RESULTS[0]}"
+  return 0
 }

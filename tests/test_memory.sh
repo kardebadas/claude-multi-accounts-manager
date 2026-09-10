@@ -178,6 +178,68 @@ t_fixture_paths_exist_on_disk_and_are_all_relative() {
   cleanup_memory_fixture
 }
 
+t_decode_slug_plain_nesting() {
+  make_memory_fixture
+  assert_eq "$FIX_FS/projects/gamma" \
+    "$(decode_slug "$(fix_slug projects/gamma)")" \
+    "decodes a two-level path with no literal hyphens in the leaf"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_literal_hyphens_in_leaf() {
+  make_memory_fixture
+  assert_eq "$FIX_FS/projects/alpha-service" \
+    "$(decode_slug "$(fix_slug projects/alpha-service)")" \
+    "one literal hyphen in a component"
+  assert_eq "$FIX_FS/projects/delta-one-two-three" \
+    "$(decode_slug "$(fix_slug projects/delta-one-two-three)")" \
+    "three literal hyphens in one component"
+  assert_eq "$FIX_FS/projects/sigma-sigma-notes" \
+    "$(decode_slug "$(fix_slug projects/sigma-sigma-notes)")" \
+    "repeated token with literal hyphens"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_mixes_separators_and_hyphens() {
+  make_memory_fixture
+  assert_eq "$FIX_FS/projects/zeta/scripts/env-provisioning" \
+    "$(decode_slug "$(fix_slug projects/zeta/scripts/env-provisioning)")" \
+    "prefix-extension of another valid slug"
+  assert_eq "$FIX_FS/projects/zeta" \
+    "$(decode_slug "$(fix_slug projects/zeta)")" \
+    "the shorter sibling slug still decodes"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_dot_space_and_underscore_literals() {
+  make_memory_fixture
+  assert_eq "$FIX_FS/projects/zeta/.claude/worktrees/agent-eight" \
+    "$(decode_slug "$(fix_slug projects/zeta/.claude/worktrees/agent-eight)")" \
+    "leading-dot component decodes from a doubled hyphen"
+  assert_eq "$FIX_FS/dot/.hidden-notes" \
+    "$(decode_slug "$(fix_slug dot/.hidden-notes)")" \
+    "dot plus literal hyphen in one component"
+  assert_eq "$FIX_FS/projects/two words" \
+    "$(decode_slug "$(fix_slug "projects/two words")")" \
+    "a space inside a component decodes"
+  assert_eq "$FIX_FS/projects/theta.tools" \
+    "$(decode_slug "$(fix_slug projects/theta.tools)")" \
+    "a dot inside a component decodes"
+  cleanup_memory_fixture
+}
+
+t_decode_slug_every_real_fixture_slug_round_trips() {
+  make_memory_fixture
+  local rel decoded
+  for rel in "${FIX_REAL_RELPATHS[@]}"; do
+    assert_eq "yes" "$(yesno decode_slug "$(fix_slug "$rel")")" \
+      "decode_slug must succeed for real slug: $rel"
+    decoded="$(decode_slug "$(fix_slug "$rel")")"
+    assert_eq "$FIX_FS/$rel" "$decoded" "round trip for $rel"
+  done
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0
@@ -202,8 +264,5 @@ run_all_memory_tests() {
   return "$status"
 }
 
-if run_all_memory_tests; then
-  exit 0
-else
-  exit 1
-fi
+# Keep this outside a conditional so errexit remains active inside each test.
+run_all_memory_tests
