@@ -513,6 +513,54 @@ t_a_blob_read_failure_is_unscannable() {
   unset -f git
 }
 
+# A successful size query that returns anything except a decimal byte count is
+# not authoritative. Sanitising the result can turn malformed output into a
+# plausible size and let the staged blob pass as though it had been measured.
+t_a_malformed_blob_size_is_unscannable() {
+  new_repo
+  printf 'echo hi\n' >lib/ok.sh
+  git add -f -- lib/ok.sh
+  # shellcheck source=/dev/null
+  source scripts/check-no-secrets.sh
+  git() {
+    case "$*" in
+      *"cat-file -s"*) printf 'not-a-size\n'; return 0 ;;
+      *)               command git "$@" ;;
+    esac
+  }
+  if ! blob_is_unscannable "$PWD" lib/ok.sh; then
+    unset -f git
+    printf '  FAIL: a malformed staged-blob size was treated as scannable\n' >&2
+    return 1
+  fi
+  unset -f git
+}
+
+# 3. End to end, the size query itself can fail before the byte-counting read.
+#    Keep the staged index entry but make its loose object unavailable: a guard
+#    that conflates a failed size query with a legitimate empty blob will pass
+#    the index without ever scanning the content.
+t_a_missing_staged_blob_is_refused() {
+  new_repo
+  local oid object out
+  printf '# see %s\n' "$(printf '/%s/%s/.claude' "home" "$fake_user")" >lib/leak.sh
+  git add -f -- lib/leak.sh
+  oid="$(git rev-parse :lib/leak.sh)"
+  object=".git/objects/${oid:0:2}/${oid:2}"
+  if [[ ! -f "$object" ]]; then
+    printf '  FAIL: staged fixture is not stored as the expected loose object\n' >&2
+    return 1
+  fi
+  mv -- "$object" "$object.unavailable"
+
+  assert_fails bash scripts/check-no-secrets.sh
+  out="$(refusal)"
+  assert_contains "$out" "REFUSED" "an unreadable staged blob must be refused"
+  assert_contains "$out" "lib/leak.sh" "the refusal must name the unreadable path"
+  assert_contains "$out" "cannot be scanned" "the refusal must explain the fail-closed decision"
+  assert_stdout_empty_bytes bash scripts/check-no-secrets.sh
+}
+
 # ── a gitlink cannot be scanned either (M-6) ─────────────────────────────────
 # `git show ":sub"` on a submodule entry yields no content, so both content
 # scans silently found nothing and the entry passed. This repo has no

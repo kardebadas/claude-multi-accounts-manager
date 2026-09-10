@@ -235,9 +235,13 @@ reject() {
 # tests/test_check_no_secrets.sh pin both sides of that decision.
 blob_is_unscannable() {
   local bytes without_nuls
-  bytes="$(git -C "$1" cat-file -s ":$2" 2>/dev/null || true)"
-  bytes="${bytes//[^0-9]/}"
-  if [[ -z "$bytes" || "$bytes" == "0" ]]; then
+  if ! bytes="$(git -C "$1" cat-file -s ":$2" 2>/dev/null)"; then
+    return 0
+  fi
+  if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if [[ "$bytes" == "0" ]]; then
     return 1
   fi
   if ! without_nuls="$(git -C "$1" cat-file blob ":$2" 2>/dev/null \
@@ -376,13 +380,7 @@ physical_dir_path() {
 #    was pointed at.
 hooks_dir_for() {
   local top="$1" dir common physical_top physical_common
-  dir="$(git -C "$top" config --get core.hooksPath 2>/dev/null || true)"
-  if [[ -z "$dir" ]]; then
-    dir="$(git -C "$top" rev-parse --git-path hooks)"
-  fi
-  # git resolves a relative core.hooksPath against the worktree root, and
-  # --git-path answers relative to the directory it was run in ("$top").
-  case "$dir" in /*) ;; *) dir="$top/$dir" ;; esac
+  dir="$(git -C "$top" rev-parse --path-format=absolute --git-path hooks)"
 
   common="$(git -C "$top" rev-parse --git-common-dir)"
   case "$common" in /*) ;; *) common="$top/$common" ;; esac
