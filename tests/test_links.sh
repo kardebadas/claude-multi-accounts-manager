@@ -159,6 +159,34 @@ test_link_create_stdout_is_byte_empty() {
   assert_stdout_empty_bytes link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
 }
 
+test_link_create_abs_points_shared_skills_at_the_resolved_codex_dir() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  link_create "$CLAUDE_MULTI_ROOT/shared/skills" "$FIXTURE_TMP/codex-skills" abs
+  assert_link "$CLAUDE_MULTI_ROOT/shared/skills" "$FIXTURE_TMP/codex-skills"
+  assert_is_dir "$CLAUDE_MULTI_ROOT/shared/skills"
+}
+
+test_link_create_abs_rejects_a_relative_target() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  # This is exactly the link text `cp -a ~/.claude/skills` would carry over.
+  assert_fails link_create "$CLAUDE_MULTI_ROOT/shared/skills" "../.codex-skills" abs
+  assert_absent "$CLAUDE_MULTI_ROOT/shared/skills"
+}
+
+test_link_create_rejects_an_unknown_kind() {
+  new_fixture
+  assert_fails link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" sideways
+  assert_absent "$CLAUDE_MULTI_ROOT/personal/agents"
+}
+
+test_link_create_abs_stdout_is_byte_empty() {
+  new_fixture
+  rm "$CLAUDE_MULTI_ROOT/shared/skills"
+  assert_stdout_empty_bytes link_create "$CLAUDE_MULTI_ROOT/shared/skills" "$FIXTURE_TMP/codex-skills" abs
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -180,6 +208,10 @@ run_test test_link_create_replaces_an_existing_symlink
 run_test test_link_create_refuses_to_clobber_a_real_file
 run_test test_link_create_refusal_explains_itself_on_stderr
 run_test test_link_create_stdout_is_byte_empty
+run_test test_link_create_abs_points_shared_skills_at_the_resolved_codex_dir
+run_test test_link_create_abs_rejects_a_relative_target
+run_test test_link_create_rejects_an_unknown_kind
+run_test test_link_create_abs_stdout_is_byte_empty
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while
