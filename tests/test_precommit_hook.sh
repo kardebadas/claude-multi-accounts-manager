@@ -332,6 +332,41 @@ t_install_refuses_a_hookspath_outside_the_repo() {
     "--force must not write outside the repository either"
 }
 
+# Git expands pathname-valued config before looking for hooks. In particular,
+# a leading ~/ is rooted at HOME rather than treated as a worktree-relative
+# directory. The installer must inspect that effective path and refuse it;
+# writing a literal <repo>/~/.hooks would report success but install an inert
+# hook that Git never runs.
+t_install_refuses_git_expanded_tilde_hookspath_outside_the_repo() {
+  new_repo
+  local effective literal normal_out force_out
+  git config core.hooksPath '~/.hooks'
+  effective="$(git rev-parse --path-format=absolute --git-path hooks)"
+  literal="$PWD/~/.hooks"
+  assert_eq "$HOME/.hooks" "$effective" \
+    "Git must resolve the configured tilde path outside the repository"
+
+  assert_fails install
+  normal_out="$(install_err)"
+  assert_contains "$normal_out" "core.hooksPath" "the refusal must name the setting"
+  assert_contains "$normal_out" "outside" "the refusal must explain the containment failure"
+  assert_eq "" "$([[ -e "$effective/pre-commit" ]] && printf 'exists')" \
+    "the installer must not write to Git's effective hooks path"
+  assert_eq "" "$([[ -e "$literal/pre-commit" ]] && printf 'exists')" \
+    "the installer must not write to a literal worktree-relative tilde path"
+  assert_stdout_empty_bytes bash scripts/check-no-secrets.sh --install-hook
+
+  assert_fails install --force
+  force_out="$(install_err --force)"
+  assert_contains "$force_out" "core.hooksPath" "the forced refusal must name the setting"
+  assert_contains "$force_out" "outside" "the forced refusal must explain the containment failure"
+  assert_eq "" "$([[ -e "$effective/pre-commit" ]] && printf 'exists')" \
+    "--force must not write to Git's effective hooks path"
+  assert_eq "" "$([[ -e "$literal/pre-commit" ]] && printf 'exists')" \
+    "--force must not write to a literal worktree-relative tilde path"
+  assert_stdout_empty_bytes bash scripts/check-no-secrets.sh --install-hook --force
+}
+
 # F-005: lexical containment is insufficient when an in-repo path component is
 # a symlink. Git follows this redirect, but the installer must not follow it out
 # of the repository and create an externally located pre-commit hook.
