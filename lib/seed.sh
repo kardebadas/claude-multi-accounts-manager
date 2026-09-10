@@ -38,3 +38,37 @@ validate_main_folder() {
   warn "not a Claude config folder (no settings.json or CLAUDE.md): $path"
   return 1
 }
+
+# Directories copied verbatim from the main folder into shared/.
+# `skills` and `commands` are NOT in this list — they need special handling.
+SEED_COPY_DIRS=("agents" "hooks" "agent-memory")
+
+seed_shared() {
+  local main="${1-}"
+  local shared="${2:-$(multi_root)/shared}"
+
+  validate_main_folder "$main" || return 1
+
+  mkdir -p "$shared" "$shared/plugin-cache"
+
+  if [[ -f "$main/CLAUDE.md" ]]; then
+    cp -p "$main/CLAUDE.md" "$shared/CLAUDE.md"
+    log "seeded CLAUDE.md"
+  else
+    log "skipped CLAUDE.md (absent in $main)"
+  fi
+
+  local d
+  for d in "${SEED_COPY_DIRS[@]}"; do
+    if [[ -d "$main/$d" ]]; then
+      mkdir -p "$shared/$d"
+      # "$src/." copies the CONTENTS, so a re-run does not nest src inside dst.
+      cp -a "$main/$d/." "$shared/$d/"
+      log "seeded $d/"
+    else
+      log "skipped $d/ (absent in $main)"
+    fi
+  done
+
+  return 0
+}

@@ -80,6 +80,44 @@ test_validate_reports_its_reason_on_stderr_only() {
   rm -rf "$tmp"
 }
 
+test_seed_copies_the_shared_config_items() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "file" "$(kind "$shared/CLAUDE.md")"        "CLAUDE.md copied"
+  assert_eq "# fixture global CLAUDE.md" "$(cat "$shared/CLAUDE.md")" "CLAUDE.md content"
+  assert_eq "dir"  "$(kind "$shared/agents")"           "agents/ copied"
+  assert_eq "file" "$(kind "$shared/agents/brainstorm-architect.md")" "agents/ contents copied"
+  assert_eq "dir"  "$(kind "$shared/hooks")"            "hooks/ copied"
+  assert_eq "file" "$(kind "$shared/hooks/post-commit-practices.sh")" "hook script copied"
+  assert_eq "dir"  "$(kind "$shared/plugin-cache")"     "plugin-cache/ created"
+
+  # agent-memory keeps its subdirectory structure
+  assert_eq "file" "$(kind "$shared/agent-memory/software-engineer/notes.md")"   "memory subdir 1"
+  assert_eq "file" "$(kind "$shared/agent-memory/brainstorm-architect/notes.md")" "memory subdir 2"
+
+  # the copied hook stays executable, or the hook silently stops firing
+  assert_eq "yes" "$([[ -x "$shared/hooks/post-commit-practices.sh" ]] && printf yes || printf no)" \
+    "hook must remain executable"
+  rm -rf "$tmp"
+}
+
+test_seed_writes_nothing_to_stdout() {
+  local tmp main; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  assert_stdout_empty_bytes seed_shared "$main" "$(multi_root)/shared"
+  rm -rf "$tmp"
+}
+
+test_seed_rejects_an_invalid_main_folder() {
+  local tmp; new_sandbox; tmp="$SANDBOX_TMP"
+  mkdir -p "$tmp/plain"
+  assert_fails seed_shared "$tmp/plain" "$(multi_root)/shared"
+  assert_eq "absent" "$(kind "$(multi_root)/shared/CLAUDE.md")" "nothing seeded on rejection"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
