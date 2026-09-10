@@ -425,6 +425,86 @@ t_refuses_a_binary_blob() {
   rm -f -- lib/blob
 }
 
+# ── the binary decision must not be able to come back as a SIGNAL ────────────
+# blob_is_unscannable used to be `if git show ":$p" | grep -Iq -e ''`. `grep -q`
+# exits at its first match and closes the pipe, `git show` dies of SIGPIPE with
+# a large blob still half-written, pipefail turns the pipeline into 141, and the
+# `if` reads that as "grep would not read it" — so an ordinary UTF-8 shell
+# script was REFUSED as binary content. It needed the reader to win the race, so
+# it was intermittent: roughly one whole-suite run in five, blaming a different
+# innocent file each time.
+#
+# The two tests below pin it deterministically, from opposite ends. Both fail if
+# the unguarded pipeline is ever reintroduced, and neither depends on machine
+# load — a repeat-loop on an idle machine proves almost nothing here.
+#
+# 1. Through the real guard, with a blob far larger than the 64 KiB pipe buffer,
+#    so the writer CANNOT finish before a `grep -q` on the other end exits. The
+#    old construct returned 141 on 10 of 10 runs at this size.
+t_a_large_text_blob_is_not_refused_as_binary() {
+  new_repo
+  local i
+  { for ((i = 0; i < 40000; i++)); do printf 'echo line %s\n' "$i"; done; } >lib/big.sh
+  # Guard the premise: a blob that fits in the pipe buffer would prove nothing.
+  local bytes
+  git add -f -- lib/big.sh
+  bytes="$(git cat-file -s :lib/big.sh)"
+  if ((bytes < 200000)); then
+    printf '  FAIL: fixture is only %s bytes — too small to force the pipe to fill\n' "$bytes" >&2
+    return 1
+  fi
+  if ! bash scripts/check-no-secrets.sh >/dev/null 2>&1; then
+    printf '  FAIL: an ordinary %s-byte text blob was refused:\n%s\n' "$bytes" "$(refusal)" >&2
+    git reset -q
+    return 1
+  fi
+  assert_stdout_empty_bytes bash scripts/check-no-secrets.sh
+  git reset -q
+  rm -f -- lib/big.sh
+}
+
+# 2. At the seam, with the 141 injected directly, so the pin does not depend on
+#    a pipe buffer size either. The guard is SOURCED for its functions — the
+#    `BASH_SOURCE == $0` guard at its foot keeps main from running — and `git`
+#    is shadowed by a shim that writes ordinary text and then exits 141, exactly
+#    as a SIGPIPE-killed `git show` does. The decision must still be
+#    "scannable": a signal is not an answer.
+t_a_sigpipe_writer_is_not_read_as_binary() {
+  new_repo
+  printf 'echo hi\n' >lib/ok.sh
+  git add -f -- lib/ok.sh
+  # shellcheck source=/dev/null
+  source scripts/check-no-secrets.sh
+  git() {
+    case "$*" in
+      *"cat-file -s"*) printf '9\n'; return 0 ;;
+      *show*)          printf 'echo hi\n'; return 141 ;;
+      *)               command git "$@" ;;
+    esac
+  }
+  if blob_is_unscannable "$PWD" lib/ok.sh; then
+    unset -f git
+    printf '  FAIL: a writer killed by SIGPIPE (141) was read as binary content\n' >&2
+    return 1
+  fi
+  # …and a grep that genuinely refuses the blob must still say "unscannable",
+  # so the fix cannot have been "call everything scannable". Status 1 from grep
+  # is what -I reports for a binary stream.
+  git() {
+    case "$*" in
+      *"cat-file -s"*) printf '9\n'; return 0 ;;
+      *show*)          printf 'PNG\000\001\002\n'; return 0 ;;
+      *)               command git "$@" ;;
+    esac
+  }
+  if ! blob_is_unscannable "$PWD" lib/ok.sh; then
+    unset -f git
+    printf '  FAIL: a binary blob was read as scannable — the binary rule is gone\n' >&2
+    return 1
+  fi
+  unset -f git
+}
+
 # ── a gitlink cannot be scanned either (M-6) ─────────────────────────────────
 # `git show ":sub"` on a submodule entry yields no content, so both content
 # scans silently found nothing and the entry passed. This repo has no
@@ -591,8 +671,9 @@ t_unknown_argument_fails() {
   out="$(bash scripts/check-no-secrets.sh --bogus 2>&1 >/dev/null || true)"
   assert_contains "$out" "unknown argument" "an unknown argument must be explained"
   assert_no_stdout bash scripts/check-no-secrets.sh --bogus
-  # --install-hook arrives in T12; until then it must not silently pass.
-  assert_fails bash scripts/check-no-secrets.sh --install-hook
+  # --install-hook was the placeholder here while it did not exist yet. It is a
+  # real argument now; its whole contract lives in tests/test_precommit_hook.sh,
+  # including that `--install-hook --bogus` is still an error.
 }
 
 # ── outside a git repository the guard must say so, not crash ────────────────
