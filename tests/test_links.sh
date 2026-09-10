@@ -187,6 +187,36 @@ test_link_create_abs_stdout_is_byte_empty() {
   assert_stdout_empty_bytes link_create "$CLAUDE_MULTI_ROOT/shared/skills" "$FIXTURE_TMP/codex-skills" abs
 }
 
+test_link_verify_reports_wrong_target_for_a_misaimed_link() {
+  new_fixture
+  ln -sfn "../shared/agent-memory" "$CLAUDE_MULTI_ROOT/personal/agents"
+  assert_eq "wrong-target" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")"
+}
+
+test_link_verify_reports_wrong_target_for_an_absolute_link_where_relative_is_expected() {
+  new_fixture
+  ln -sfn "$CLAUDE_MULTI_ROOT/shared/agents" "$CLAUDE_MULTI_ROOT/personal/agents"
+  assert_eq "wrong-target" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")" \
+    "the link text must match exactly, not merely resolve to the same place"
+}
+
+test_link_verify_reports_real_file_for_a_clobbered_settings_json() {
+  new_fixture
+  # This is what Claude Code's write-tmp-then-rename does to a file symlink.
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  assert_eq "real-file" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json")"
+}
+
+test_link_verify_reports_real_file_for_a_real_directory() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/agents"
+  assert_eq "real-file" \
+    "$(link_verify "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents")"
+}
+
 test_link_verify_reports_ok_for_a_correct_resolving_link() {
   new_fixture
   link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
@@ -248,6 +278,10 @@ run_test test_link_create_abs_points_shared_skills_at_the_resolved_codex_dir
 run_test test_link_create_abs_rejects_a_relative_target
 run_test test_link_create_rejects_an_unknown_kind
 run_test test_link_create_abs_stdout_is_byte_empty
+run_test test_link_verify_reports_wrong_target_for_a_misaimed_link
+run_test test_link_verify_reports_wrong_target_for_an_absolute_link_where_relative_is_expected
+run_test test_link_verify_reports_real_file_for_a_clobbered_settings_json
+run_test test_link_verify_reports_real_file_for_a_real_directory
 run_test test_link_verify_reports_ok_for_a_correct_resolving_link
 run_test test_link_verify_reports_ok_for_a_directory_link
 run_test test_link_verify_reports_missing_when_nothing_is_there
