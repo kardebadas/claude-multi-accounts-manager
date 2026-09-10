@@ -6,6 +6,7 @@ repo=$(cd "$here/.." && pwd)
 . "$here/fixtures/main-folder.sh"
 . "$repo/lib/util.sh"
 . "$repo/lib/config.sh"
+. "$repo/lib/links.sh"
 . "$repo/lib/seed.sh"
 
 # Every test gets its own temp HOME + multi root. The real ~/.claude is never touched.
@@ -158,6 +159,51 @@ test_seed_survives_a_main_folder_missing_most_sources() {
   assert_eq "absent" "$(kind "$shared/CLAUDE.md")" "absent CLAUDE.md simply skipped"
   assert_eq "absent" "$(kind "$shared/agents")"    "absent agents/ simply skipped"
   assert_eq "dir"    "$(kind "$shared/commands")"  "commands/ still created"
+  rm -rf "$tmp"
+}
+
+# Verified fact: ~/.claude/skills is a RELATIVE symlink to ../.codex-skills.
+# `cp -a` copies the link verbatim; inside shared/ that resolves to
+# ~/.claude-multi/.codex-skills, i.e. a dangling link, and every skill is gone.
+test_seed_points_shared_skills_at_the_resolved_absolute_target() {
+  local tmp main shared expected; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  expected=$(readlink -f "$tmp/.codex-skills")
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "link" "$(kind "$shared/skills")" "shared/skills must be a symlink"
+  assert_link "$shared/skills" "$expected" "must be the ABSOLUTE resolved target"
+  # the link must actually resolve — the dangling-link failure mode
+  assert_eq "file" "$(kind "$shared/skills/brainstorm/SKILL.md")" "skills must be reachable through the link"
+  assert_eq "no" "$([[ "$(readlink "$shared/skills")" == ../* ]] && printf yes || printf no)" \
+    "must not be a copied relative link"
+  rm -rf "$tmp"
+}
+
+test_seed_warns_and_creates_nothing_for_a_dangling_skills_link() {
+  local tmp main shared err; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  rm -rf "$tmp/.codex-skills"      # link now dangles
+
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+
+  assert_eq "absent" "$(kind "$shared/skills")" "must NOT create a dangling shared/skills"
+  assert_contains "$err" "dangling" "must warn about the dangling source link"
+  rm -rf "$tmp"
+}
+
+test_seed_copies_skills_when_the_source_is_a_real_directory() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+  rm -f "$main/skills"
+  mkdir -p "$main/skills/local-skill"
+  printf '# local\n' > "$main/skills/local-skill/SKILL.md"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "dir"  "$(kind "$shared/skills")" "real dir source is copied, not linked"
+  assert_eq "file" "$(kind "$shared/skills/local-skill/SKILL.md")" "skills contents copied"
   rm -rf "$tmp"
 }
 

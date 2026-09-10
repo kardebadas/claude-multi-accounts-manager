@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lib/seed.sh — first-run seeding of shared/ from the read-only main folder.
-# Sourced by bin/claude-multi. Requires lib/util.sh (log/warn/die) and
-# lib/config.sh (multi_root). Writes nothing outside the shared dir.
+# Sourced by bin/claude-multi. Requires lib/util.sh (log/warn/die),
+# lib/config.sh (multi_root), and lib/links.sh (link_create). Writes nothing
+# outside the shared dir.
 
 # A directory is a Claude config folder if it holds one of these.
 CLAUDE_MARKERS=("settings.json" "CLAUDE.md")
@@ -43,6 +44,35 @@ validate_main_folder() {
 # `skills` and `commands` are NOT in this list — they need special handling.
 SEED_COPY_DIRS=("agents" "hooks" "agent-memory")
 
+# shared/skills must point at the RESOLVED target of the source link.
+# Copying the link is the silent-data-loss failure mode: ~/.claude/skills is
+# `../.codex-skills`, which inside shared/ resolves to a path that does not exist.
+seed_skills_link() {
+  local main="$1" shared="$2"
+  local src="$main/skills" target
+
+  if [[ -L "$src" ]]; then
+    target=$(readlink -f "$src" 2>/dev/null || true)
+    if [[ -z "$target" || ! -d "$target" ]]; then
+      warn "skills: source link is dangling ($src -> $(readlink "$src")); shared/skills not created"
+      return 0
+    fi
+    link_create "$shared/skills" "$target" abs || return 1
+    log "linked skills -> $target (resolved from the source symlink)"
+    return 0
+  fi
+
+  if [[ -d "$src" ]]; then
+    mkdir -p "$shared/skills"
+    cp -a "$src/." "$shared/skills/"
+    log "seeded skills/ (source is a real directory)"
+    return 0
+  fi
+
+  log "skipped skills (absent in $main)"
+  return 0
+}
+
 seed_shared() {
   local main="${1-}"
   local shared="${2:-$(multi_root)/shared}"
@@ -78,6 +108,8 @@ seed_shared() {
   else
     log "created commands/ empty (absent in $main)"
   fi
+
+  seed_skills_link "$main" "$shared" || return 1
 
   return 0
 }
