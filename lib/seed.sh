@@ -111,6 +111,13 @@ seed_shared() {
 
   seed_skills_link "$main" "$shared" || return 1
 
+  if [[ -f "$main/settings.json" ]]; then
+    rewrite_hook_paths "$main/settings.json" "$shared/settings.json" "$main" "$shared" || return 1
+    log "seeded settings.json (hook paths rewritten into $shared/hooks)"
+  else
+    log "skipped settings.json (absent in $main)"
+  fi
+
   return 0
 }
 

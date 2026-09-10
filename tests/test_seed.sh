@@ -262,6 +262,74 @@ test_rewrite_writes_no_temp_file_behind() {
   rm -rf "$tmp"
 }
 
+test_seed_produces_a_settings_json_with_rewritten_hooks() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  shared="$(multi_root)/shared"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "file" "$(kind "$shared/settings.json")" "settings.json seeded"
+  assert_contains "$(cat "$shared/settings.json")" \
+    "\"command\": \"$shared/hooks/post-commit-practices.sh\"" "hook rewritten during seeding"
+  # and the rewritten target must actually exist, because hooks/ was copied
+  assert_eq "file" "$(kind "$shared/hooks/post-commit-practices.sh")" "rewritten target exists"
+  rm -rf "$tmp"
+}
+
+test_rewrite_handles_a_main_folder_path_with_spaces() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"
+  mkdir -p "$tmp/my configs"
+  main=$(make_fixture_main "$tmp/my configs" "claude dir")
+  shared="$(multi_root)/my shared"
+
+  seed_shared "$main" "$shared"
+
+  assert_contains "$(cat "$shared/settings.json")" \
+    "\"command\": \"$shared/hooks/post-commit-practices.sh\"" "spaces in both paths handled"
+  assert_eq "no" "$(grep -qF "$main/hooks/" "$shared/settings.json" && printf yes || printf no)" \
+    "old path fully gone"
+  rm -rf "$tmp"
+}
+
+test_rewrite_copies_a_settings_json_with_no_hooks_key_verbatim() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"
+  main="$tmp/nohooks"; shared="$(multi_root)/shared"
+  mkdir -p "$main"
+  printf '{\n  "model": "opus[1m]"\n}\n' > "$main/settings.json"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "$(md5sum < "$main/settings.json")" "$(md5sum < "$shared/settings.json")" \
+    "with nothing to rewrite the file is byte-identical"
+  rm -rf "$tmp"
+}
+
+test_seed_warns_when_a_main_folder_path_survives_the_rewrite() {
+  local tmp main shared err; new_sandbox; tmp="$SANDBOX_TMP"
+  main="$tmp/odd"; shared="$(multi_root)/shared"
+  mkdir -p "$main"
+  # a command that points into the main folder but NOT into its hooks/ dir
+  printf '{\n  "hooks": { "PostToolUse": [ { "hooks": [ { "type": "command", "command": "%s/scripts/x.sh" } ] } ] }\n}\n' \
+    "$main" > "$main/settings.json"
+
+  err=$(seed_shared "$main" "$shared" 2>&1 >/dev/null)
+
+  assert_contains "$err" "still references the main folder" "unhandled source path must be reported"
+  rm -rf "$tmp"
+}
+
+test_seed_skips_an_absent_settings_json() {
+  local tmp main shared; new_sandbox; tmp="$SANDBOX_TMP"
+  main="$tmp/nosettings"; shared="$(multi_root)/shared"
+  mkdir -p "$main"
+  printf '# only a CLAUDE.md marker\n' > "$main/CLAUDE.md"
+
+  seed_shared "$main" "$shared"
+
+  assert_eq "absent" "$(kind "$shared/settings.json")" "absent settings.json simply skipped"
+  rm -rf "$tmp"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   status=0
   runner_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmseed-run.XXXXXX")
