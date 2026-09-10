@@ -425,6 +425,33 @@ t_refuses_a_binary_blob() {
   rm -f -- lib/blob
 }
 
+# F-003: a text prefix larger than the pipe buffer must not hide binary content
+# later in the staged blob. The old `grep -Iq` decision returned at the first
+# text line, before it ever reached the NUL, so both it and the later `grep -I`
+# content scans treated this mixed blob as clean.
+t_refuses_a_large_text_prefixed_binary_blob() {
+  new_repo
+  local bytes i leak out
+  leak="$(printf '/%s/%s/.claude' "home" "$fake_user")"
+  { for ((i = 0; i < 40000; i++)); do printf 'echo line %s\n' "$i"; done; } >lib/mixed.sh
+  printf '\000%s\n' "$leak" >>lib/mixed.sh
+  git add -f -- lib/mixed.sh
+
+  bytes="$(git cat-file -s :lib/mixed.sh)"
+  if ((bytes < 200000)); then
+    printf '  FAIL: fixture is only %s bytes — too small to exceed the pipe buffer\n' "$bytes" >&2
+    return 1
+  fi
+  if bash scripts/check-no-secrets.sh >/dev/null 2>&1; then
+    printf '  FAIL: the guard accepted a %s-byte text-prefixed binary blob\n' "$bytes" >&2
+    return 1
+  fi
+  out="$(refusal)"
+  assert_contains "$out" "lib/mixed.sh" "the refusal must name the mixed blob"
+  assert_contains "$out" "binary" "the complete blob must be classified as binary"
+  assert_no_stdout bash scripts/check-no-secrets.sh
+}
+
 # ── the binary decision must not be able to come back as a SIGNAL ────────────
 # blob_is_unscannable used to be `if git show ":$p" | grep -Iq -e ''`. `grep -q`
 # exits at its first match and closes the pipe, `git show` dies of SIGPIPE with
@@ -434,9 +461,8 @@ t_refuses_a_binary_blob() {
 # it was intermittent: roughly one whole-suite run in five, blaming a different
 # innocent file each time.
 #
-# The two tests below pin it deterministically, from opposite ends. Both fail if
-# the unguarded pipeline is ever reintroduced, and neither depends on machine
-# load — a repeat-loop on an idle machine proves almost nothing here.
+# The tests below pin both sides of the replacement: a complete large text blob
+# stays scannable, while a genuine staged-blob read failure stays fail-closed.
 #
 # 1. Through the real guard, with a blob far larger than the 64 KiB pipe buffer,
 #    so the writer CANNOT finish before a `grep -q` on the other end exits. The
@@ -463,13 +489,10 @@ t_a_large_text_blob_is_not_refused_as_binary() {
   rm -f -- lib/big.sh
 }
 
-# 2. At the seam, with the 141 injected directly, so the pin does not depend on
-#    a pipe buffer size either. The guard is SOURCED for its functions — the
-#    `BASH_SOURCE == $0` guard at its foot keeps main from running — and `git`
-#    is shadowed by a shim that writes ordinary text and then exits 141, exactly
-#    as a SIGPIPE-killed `git show` does. The decision must still be
-#    "scannable": a signal is not an answer.
-t_a_sigpipe_writer_is_not_read_as_binary() {
+# 2. At the seam, a staged-blob read that genuinely fails must stay fail-closed.
+#    The full byte-counting consumer above removes the short-read/SIGPIPE race,
+#    so any remaining non-zero producer status is a real inability to scan.
+t_a_blob_read_failure_is_unscannable() {
   new_repo
   printf 'echo hi\n' >lib/ok.sh
   git add -f -- lib/ok.sh
@@ -477,29 +500,14 @@ t_a_sigpipe_writer_is_not_read_as_binary() {
   source scripts/check-no-secrets.sh
   git() {
     case "$*" in
-      *"cat-file -s"*) printf '9\n'; return 0 ;;
-      *show*)          printf 'echo hi\n'; return 141 ;;
-      *)               command git "$@" ;;
-    esac
-  }
-  if blob_is_unscannable "$PWD" lib/ok.sh; then
-    unset -f git
-    printf '  FAIL: a writer killed by SIGPIPE (141) was read as binary content\n' >&2
-    return 1
-  fi
-  # …and a grep that genuinely refuses the blob must still say "unscannable",
-  # so the fix cannot have been "call everything scannable". Status 1 from grep
-  # is what -I reports for a binary stream.
-  git() {
-    case "$*" in
-      *"cat-file -s"*) printf '9\n'; return 0 ;;
-      *show*)          printf 'PNG\000\001\002\n'; return 0 ;;
+      *"cat-file -s"*)    printf '8\n'; return 0 ;;
+      *"cat-file blob"*) return 1 ;;
       *)               command git "$@" ;;
     esac
   }
   if ! blob_is_unscannable "$PWD" lib/ok.sh; then
     unset -f git
-    printf '  FAIL: a binary blob was read as scannable — the binary rule is gone\n' >&2
+    printf '  FAIL: a failed staged-blob read was treated as scannable\n' >&2
     return 1
   fi
   unset -f git

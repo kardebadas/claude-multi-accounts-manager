@@ -209,16 +209,13 @@ reject() {
 # blob_is_unscannable <top> <path> — true when the content scans below cannot
 # see inside the staged blob, so a leak in it would pass unexamined.
 #
-# `grep -I` is documented as "process a binary file as if it did not contain
-# matching data": a staged .png, .pdf or compiled artifact carrying a home path
-# or a token used to exit 0 with neither scan having looked at a single byte.
-# This asks grep itself the question — an empty pattern matches every line of
-# anything grep is willing to read — so the answer tracks the scanner's own
-# heuristic rather than a second guess at it. An empty blob is not unscannable;
+# `grep -I` skips a blob after seeing a NUL, but `grep -Iq` may return at an
+# earlier text line without ever reaching that NUL. Detect binary content by
+# consuming the complete staged blob, removing NULs, and comparing the remaining
+# byte count with git's authoritative blob size. An empty blob is scannable;
 # there is simply nothing in it, so its size is checked first.
 #
-# THE WRITER IS NEUTRALISED ON PURPOSE, and the status is read explicitly. This
-# used to be a plain `if git show … | grep -Iq …`, which had a live bug:
+# This used to be a plain `if git show … | grep -Iq …`, which had a live bug:
 #
 #   `grep -q` exits at its FIRST match, closing the pipe while `git show` still
 #   has most of a large blob to write. git dies of SIGPIPE, `set -o pipefail`
@@ -232,32 +229,23 @@ reject() {
 # the 64 KiB pipe buffer the writer CANNOT finish first. The old construct then
 # returned 141 on 10 of 10 runs; this one returns 0 on 10 of 10.
 #
-# `|| true` on the writer is the fix, and the reason it is the fix rather than a
-# workaround: with the producer's status forced to 0 the pipeline's status is
-# grep's alone, so a signal can no longer masquerade as an answer. Note that
-# dropping `-q` so grep consumes the whole blob does NOT fix this — measured on
-# ugrep 7.8.4, the grep on the machine where this was found, `grep -Ic -e ''`
-# still short-circuits and still produced 141 on 8 of 8 runs. The signal has to
-# be neutralised, not avoided, and that holds for any grep.
-#
-# The three outcomes are then spelled out instead of collapsed into true/false,
-# so a grep that ERRORS is refused rather than assumed to have scanned cleanly.
-# The regression pins are t_a_large_text_blob_is_not_refused_as_binary and
-# t_a_sigpipe_writer_is_not_read_as_binary in tests/test_check_no_secrets.sh.
+# The byte-counting consumers do not short-circuit, so they cannot close the
+# pipe while git is still writing. A failed read is refused rather than assumed
+# clean. The large-text and mixed-blob regressions in
+# tests/test_check_no_secrets.sh pin both sides of that decision.
 blob_is_unscannable() {
-  local bytes status
+  local bytes without_nuls
   bytes="$(git -C "$1" cat-file -s ":$2" 2>/dev/null || true)"
   bytes="${bytes//[^0-9]/}"
   if [[ -z "$bytes" || "$bytes" == "0" ]]; then
     return 1
   fi
-  status=0
-  { git -C "$1" show ":$2" 2>/dev/null || true; } | grep -Iq -e '' || status=$?
-  case "$status" in
-    0) return 1 ;;  # grep was willing to read it — scannable
-    1) return 0 ;;  # grep refused it as binary (-I) — unscannable
-    *) return 0 ;;  # grep itself failed — refuse rather than pretend it scanned
-  esac
+  if ! without_nuls="$(git -C "$1" cat-file blob ":$2" 2>/dev/null \
+    | tr -d '\000' | wc -c)"; then
+    return 0
+  fi
+  without_nuls="${without_nuls//[^0-9]/}"
+  [[ "$without_nuls" != "$bytes" ]]
 }
 
 # ── the check ────────────────────────────────────────────────────────────────
@@ -349,6 +337,26 @@ check_staged() {
 }
 
 # ── hook installation ────────────────────────────────────────────────────────
+# physical_dir_path <path> — resolve every existing path component through
+# symlinks without creating the missing tail. This is the containment boundary
+# used before any hooks directory is created.
+physical_dir_path() {
+  local path="$1" leaf suffix="" resolved
+  while [[ "$path" != "/" && "$path" == */ ]]; do path="${path%/}"; done
+  while [[ ! -d "$path" ]]; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      return 1
+    fi
+    leaf="${path##*/}"
+    [[ -n "$leaf" ]] || return 1
+    suffix="/$leaf$suffix"
+    path="${path%/*}"
+    [[ -n "$path" ]] || path="/"
+  done
+  resolved="$(cd -- "$path" 2>/dev/null && pwd -P)" || return 1
+  printf '%s%s\n' "$resolved" "$suffix"
+}
+
 # hooks_dir_for <toplevel> — the directory git will actually look in for hooks,
 # echoed for a $( ) caller. Nothing else in this script returns data, and this
 # is only ever called inside a command substitution, so the script's own stdout
@@ -367,7 +375,7 @@ check_staged() {
 #    somebody else's tree, and this installer never writes outside the repo it
 #    was pointed at.
 hooks_dir_for() {
-  local top="$1" dir common
+  local top="$1" dir common physical_top physical_common
   dir="$(git -C "$top" config --get core.hooksPath 2>/dev/null || true)"
   if [[ -z "$dir" ]]; then
     dir="$(git -C "$top" rev-parse --git-path hooks)"
@@ -389,7 +397,14 @@ hooks_dir_for() {
       return 2
       ;;
   esac
-  if [[ "$dir/" != "$top/"* && "$dir/" != "$common/"* ]]; then
+  if ! physical_top="$(physical_dir_path "$top")" \
+    || ! physical_common="$(physical_dir_path "$common")" \
+    || ! dir="$(physical_dir_path "$dir")"; then
+    printf '%s: core.hooksPath cannot be safely resolved: %s\n' "$prog" "$dir" >&2
+    printf '%s: refusing to install a hook there.\n' "$prog" >&2
+    return 2
+  fi
+  if [[ "$dir/" != "$physical_top/"* && "$dir/" != "$physical_common/"* ]]; then
     printf '%s: core.hooksPath points outside this repository: %s\n' "$prog" "$dir" >&2
     printf '%s: refusing to install a hook there. Unset core.hooksPath, or point it inside the repo.\n' \
       "$prog" >&2
