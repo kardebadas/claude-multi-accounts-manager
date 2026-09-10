@@ -3,12 +3,8 @@
 #
 # This file is sourced by tests and later by the main command. The functions
 # below emit data on stdout only from data producers. Reconstruction validates
-# candidates against directories on disk; encoding and filtering are lexical.
-
-WORKTREE_SLUG_PATTERNS=(
-  '*--claude-worktrees-*'
-  '*-wt-*'
-)
+# candidates against directories on disk; worktree filtering uses that decoded
+# path so lossy slug punctuation cannot create false positives.
 
 # slug_of_path <abs_path> -> slug
 slug_of_path() {
@@ -16,16 +12,24 @@ slug_of_path() {
   printf '%s\n' "${p//[!a-zA-Z0-9]/-}"
 }
 
-# is_worktree_slug <slug> -> 0 for an ephemeral worktree slug, 1 otherwise.
-is_worktree_slug() {
-  local slug="${1:?is_worktree_slug: slug required}" pat
-  for pat in "${WORKTREE_SLUG_PATTERNS[@]}"; do
-    # shellcheck disable=SC2053
-    if [[ $slug == $pat ]]; then
-      return 0
-    fi
-  done
+# _memory_path_is_worktree <decoded_path> -> exact component match only.
+_memory_path_is_worktree() {
+  local path="/${1#/}/"
+  if [[ $path == */.claude/worktrees/* || $path == */wt/* ]]; then
+    return 0
+  fi
   return 1
+}
+
+# is_worktree_slug <slug> -> 0 for an ephemeral worktree slug, 1 otherwise.
+# Predicate diagnostics stay silent; eligibility performs its own decode so it
+# can preserve the decoder's ambiguity and search-cap warnings.
+is_worktree_slug() {
+  local slug="${1:?is_worktree_slug: slug required}" path
+  if ! path="$(decode_slug "$slug" 2>/dev/null)"; then
+    return 1
+  fi
+  _memory_path_is_worktree "$path"
 }
 
 # Literal alternatives to a separator for each lossy '-' in a slug.
@@ -143,11 +147,11 @@ project_slugs() {
 # slug_is_eligible <slug> -> 0 when its memory may be shared, otherwise 1.
 # This predicate returns only status; decoder diagnostics remain on stderr.
 slug_is_eligible() {
-  local slug="${1:?slug_is_eligible: slug required}"
-  if is_worktree_slug "$slug"; then
+  local slug="${1:?slug_is_eligible: slug required}" path
+  if ! path="$(decode_slug "$slug")"; then
     return 1
   fi
-  if ! decode_slug "$slug" >/dev/null; then
+  if _memory_path_is_worktree "$path"; then
     return 1
   fi
   return 0

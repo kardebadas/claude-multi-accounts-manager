@@ -121,6 +121,8 @@ t_slug_of_path_encodes_every_non_alphanumeric_byte() {
 t_is_worktree_slug_matches_worktree_shapes() {
   local t
   t="$(mktemp -d "${TMPDIR:-/tmp}/cm-wt.XXXXXXXX")"
+  mkdir -p "$t/beta/.claude/worktrees/agent-one" \
+    "$t/zeta/.claude/worktrees/wt-p2-phase" "$t/wt/refactor-api"
   assert_eq "yes" "$(yesno is_worktree_slug "$(slug_of_path "$t/beta/.claude/worktrees/agent-one")")" \
     "a '/.claude/worktrees/' slug is a worktree"
   assert_eq "yes" "$(yesno is_worktree_slug "$(slug_of_path "$t/zeta/.claude/worktrees/wt-p2-phase")")" \
@@ -134,9 +136,11 @@ t_is_worktree_slug_rejects_real_project_shapes() {
   local t rel
   t="$(mktemp -d "${TMPDIR:-/tmp}/cm-real.XXXXXXXX")"
   for rel in alpha-service beta-app gamma delta-one-two-three sigma-sigma-notes \
-             epsilon_notes "two words" theta.tools zeta zeta/scripts/env-provisioning; do
+             epsilon_notes "two words" theta.tools zeta zeta/scripts/env-provisioning \
+             wt-dashboard .claude-worktrees/tool .claude/worktrees-dashboard/tool; do
+    mkdir -p "$t/projects/$rel"
     assert_eq "no" "$(yesno is_worktree_slug "$(slug_of_path "$t/projects/$rel")")" \
-      "a real project slug must not be flagged as a worktree: $rel"
+      "only exact decoded worktree path components are rejected: $rel"
   done
   rm -rf -- "$t"
 }
@@ -144,6 +148,7 @@ t_is_worktree_slug_rejects_real_project_shapes() {
 t_is_worktree_slug_writes_nothing_at_all() {
   local t slug
   t="$(mktemp -d "${TMPDIR:-/tmp}/cm-wt.XXXXXXXX")"
+  mkdir -p "$t/beta/.claude/worktrees/agent-one"
   slug="$(slug_of_path "$t/beta/.claude/worktrees/agent-one")"
   assert_stdout_empty_bytes is_worktree_slug "$slug"
   assert_eq "" "$(is_worktree_slug "$slug" 2>&1 >/dev/null || true)" \
@@ -372,9 +377,9 @@ t_slug_is_eligible_rejects_every_worktree_slug() {
   rc=0
   MEMORY_DECODE_MAX_NODES=1 slug_is_eligible "${FIX_WORKTREE_SLUGS[0]}" \
     >"$FIX_BASE/eligible.out" 2>"$FIX_BASE/eligible.err" || rc=$?
-  assert_eq "1" "$rc" "worktree rejection is independent of decode budget"
-  assert_eq "" "$(cat "$FIX_BASE/eligible.err")" \
-    "worktree rejection precedes decoding, so no search cap warning occurs"
+  assert_eq "1" "$rc" "a capped decode is ineligible before path classification"
+  assert_contains "$(cat "$FIX_BASE/eligible.err")" "search cap" \
+    "worktree classification requires the decoded path"
   assert_stdout_empty_bytes slug_is_eligible "${FIX_WORKTREE_SLUGS[0]}"
   cleanup_memory_fixture
 }
@@ -399,12 +404,12 @@ t_slug_is_eligible_rejects_gone_and_ambiguous() {
   cleanup_memory_fixture
 }
 
-t_slug_is_eligible_rejects_the_wt_false_positive() {
+t_slug_is_eligible_accepts_wt_dashboard_component() {
   make_memory_fixture
   local rc=0
-  # The lexical '-wt-' rule also skips this real project's slug.
   slug_is_eligible "$(fix_slug projects/wt-dashboard)" >/dev/null 2>&1 || rc=$?
-  assert_eq "1" "$rc" "the documented -wt- false positive is skipped"
+  assert_eq "0" "$rc" "wt-dashboard is not a component exactly named wt"
+  assert_stdout_empty_bytes slug_is_eligible "$(fix_slug projects/wt-dashboard)"
   cleanup_memory_fixture
 }
 
