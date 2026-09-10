@@ -35,3 +35,32 @@ expected_links() {
     printf '%s\t%s\n' "$root/$account/$item" "$target"
   done < <(shared_item_names)
 }
+
+# link_create <link-path> <target> [rel|abs]
+# FLOW. `rel` (default): <target> is the relative link text, e.g. ../shared/agents.
+#       `abs`:           <target> must be absolute; used verbatim as the link text.
+# Refuses a real (non-symlink) path — link_repair backs that up first.
+# Validation happens BEFORE any filesystem call, so a rejected call creates
+# nothing at all.
+link_create() {
+  local path="$1" target="$2" kind="${3:-rel}"
+  case "$kind" in
+    rel) ;;
+    abs)
+      if [[ "$target" != /* ]]; then
+        warn "link_create: abs link needs an absolute target: $target"
+        return 1
+      fi
+      ;;
+    *)
+      warn "link_create: unknown link kind: $kind"
+      return 1
+      ;;
+  esac
+  if [[ -e "$path" && ! -L "$path" ]]; then
+    warn "link_create: refusing to overwrite a real path: $path"
+    return 1
+  fi
+  mkdir -p "$(dirname "$path")"
+  ln -sfn "$target" "$path"
+}

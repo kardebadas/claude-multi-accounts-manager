@@ -116,6 +116,49 @@ test_expected_links_returns_its_rows_on_stdout_not_stderr() {
             "the rows are the return value and live on stdout"
 }
 
+test_link_create_makes_a_relative_link_that_resolves() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_eq "shared rules" "$(cat "$CLAUDE_MULTI_ROOT/personal/CLAUDE.md")" \
+    "the relative link resolves to the shared file"
+}
+
+test_link_create_creates_the_parent_directory() {
+  new_fixture
+  link_create "$CLAUDE_MULTI_ROOT/fresh/agents" "../shared/agents"
+  assert_link "$CLAUDE_MULTI_ROOT/fresh/agents" "../shared/agents"
+  assert_is_dir "$CLAUDE_MULTI_ROOT/fresh/agents"
+}
+
+test_link_create_replaces_an_existing_symlink() {
+  new_fixture
+  ln -sfn "../shared/agent-memory" "$CLAUDE_MULTI_ROOT/personal/agents"
+  link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+}
+
+test_link_create_refuses_to_clobber_a_real_file() {
+  new_fixture
+  printf 'local override\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  assert_fails link_create "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json"
+  assert_eq "local override" "$(cat "$CLAUDE_MULTI_ROOT/personal/settings.json")" \
+    "a real file is never destroyed by link_create"
+}
+
+test_link_create_refusal_explains_itself_on_stderr() {
+  new_fixture
+  printf 'local override\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  local err
+  err="$(link_create "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json" 2>&1 >/dev/null || true)"
+  assert_contains "$err" "settings.json" "the refusal names the path it refused"
+}
+
+test_link_create_stdout_is_byte_empty() {
+  new_fixture
+  assert_stdout_empty_bytes link_create "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -131,6 +174,12 @@ run_test test_expected_links_rows_are_path_tab_relative_target
 run_test test_expected_links_never_leaks_a_shared_items_row_field_separator
 run_test test_expected_links_matches_the_table_name_for_name
 run_test test_expected_links_returns_its_rows_on_stdout_not_stderr
+run_test test_link_create_makes_a_relative_link_that_resolves
+run_test test_link_create_creates_the_parent_directory
+run_test test_link_create_replaces_an_existing_symlink
+run_test test_link_create_refuses_to_clobber_a_real_file
+run_test test_link_create_refusal_explains_itself_on_stderr
+run_test test_link_create_stdout_is_byte_empty
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while
