@@ -91,6 +91,23 @@ link_verify() {
   fi
 }
 
+# path_has_content <path>
+# STATUS ONLY — prints nothing on either channel.
+# 0 for a non-empty regular file or a non-empty directory (dotfiles count),
+# 1 for an empty file or an empty directory. No shopt, no external commands.
+path_has_content() {
+  local path="$1" entry
+  if [[ -d "$path" ]]; then
+    for entry in "$path"/* "$path"/.[!.]* "$path"/..?*; do
+      if [[ -e "$entry" || -L "$entry" ]]; then
+        return 0
+      fi
+    done
+    return 1
+  fi
+  [[ -s "$path" ]]
+}
+
 # link_repair <path> <target> <status> [rel|abs]
 # FLOW. Acts on a status word from link_verify. 0 = the path is now correct,
 # 1 = it cannot be repaired here. Narration to stderr only; never exits.
@@ -107,6 +124,21 @@ link_repair() {
     wrong-target)
       link_create "$path" "$target" "$kind" || return 1
       warn "repaired link: $path -> $target"
+      ;;
+    real-file)
+      local stamp backup
+      if path_has_content "$path"; then
+        stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        backup="$path.bak.$stamp"
+        mv "$path" "$backup" || { warn "cannot back up $path — leaving it in place"; return 1; }
+        warn "backed up real path before relinking: $path -> $backup"
+      elif [[ -d "$path" ]]; then
+        rmdir "$path"          # only ever succeeds on an empty directory
+      else
+        rm -f "$path"
+      fi
+      link_create "$path" "$target" "$kind" || return 1
+      warn "replaced real path with link: $path -> $target"
       ;;
     *)
       warn "link_repair: unknown status '$status' for $path"

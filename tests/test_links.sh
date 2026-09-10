@@ -331,6 +331,85 @@ test_link_repair_rejects_an_unknown_status() {
   assert_absent "$CLAUDE_MULTI_ROOT/personal/agents"
 }
 
+test_link_repair_backs_up_a_real_file_with_content() {
+  new_fixture
+  printf '{"permissions":{"allow":["Bash(git:*)"]}}\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  link_repair "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json" real-file
+  assert_link "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json"
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/settings.json.bak.*)
+  assert_eq "1" "${#backups[@]}" "exactly one backup beside the original"
+  # An unmatched glob leaves the literal pattern in backups[0], which would
+  # satisfy the count above; assert_present is what makes the count mean
+  # something.
+  assert_present "${backups[0]}"
+  assert_contains "$(cat "${backups[0]}")" "Bash(git:*)" \
+    "the clobbered content survives in the backup"
+}
+
+test_link_repair_backs_up_a_real_directory_with_content() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/agents"
+  printf 'reviewer agent\n' > "$CLAUDE_MULTI_ROOT/personal/agents/reviewer.md"
+  link_repair "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents" real-file
+  assert_link "$CLAUDE_MULTI_ROOT/personal/agents" "../shared/agents"
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/agents.bak.*)
+  assert_eq "1" "${#backups[@]}" "exactly one backup beside the original"
+  assert_present "${backups[0]}"
+  assert_contains "$(cat "${backups[0]}/reviewer.md")" "reviewer agent"
+}
+
+test_link_repair_removes_an_empty_real_file_without_a_backup() {
+  new_fixture
+  : > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  link_repair "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json" real-file
+  assert_link "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json"
+  # No backup was created, so the glob does not match and stays literal.
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/settings.json.bak.*)
+  assert_absent "${backups[0]}"
+}
+
+test_link_repair_removes_an_empty_real_directory_without_a_backup() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/commands"
+  link_repair "$CLAUDE_MULTI_ROOT/personal/commands" "../shared/commands" real-file
+  assert_link "$CLAUDE_MULTI_ROOT/personal/commands" "../shared/commands"
+  local backups=("$CLAUDE_MULTI_ROOT"/personal/commands.bak.*)
+  assert_absent "${backups[0]}"
+}
+
+test_path_has_content_sees_dotfiles_in_a_directory() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/agents"
+  printf 'x\n' > "$CLAUDE_MULTI_ROOT/personal/agents/.hidden"
+  # A bare call: `set -e` aborts the file if it returns non-zero. assert.sh has
+  # no assert_succeeds, and inventing one is not this phase's business.
+  path_has_content "$CLAUDE_MULTI_ROOT/personal/agents"
+}
+
+test_path_has_content_is_false_for_empty_paths() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/commands"
+  assert_fails path_has_content "$CLAUDE_MULTI_ROOT/personal/commands"
+  : > "$CLAUDE_MULTI_ROOT/personal/empty"
+  assert_fails path_has_content "$CLAUDE_MULTI_ROOT/personal/empty"
+}
+
+test_path_has_content_prints_nothing_anywhere() {
+  new_fixture
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/agents"
+  printf 'x\n' > "$CLAUDE_MULTI_ROOT/personal/agents/note.md"
+  assert_stdout_empty_bytes path_has_content "$CLAUDE_MULTI_ROOT/personal/agents"
+  local err
+  err="$(path_has_content "$CLAUDE_MULTI_ROOT/personal/agents" 2>&1 >/dev/null)"
+  assert_eq "" "$err" "a predicate answers with its exit status, not with text"
+}
+
+test_link_repair_backup_stdout_is_byte_empty() {
+  new_fixture
+  printf 'x\n' > "$CLAUDE_MULTI_ROOT/personal/settings.json"
+  assert_stdout_empty_bytes link_repair "$CLAUDE_MULTI_ROOT/personal/settings.json" "../shared/settings.json" real-file
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # Every test defined above is invoked here, BARE. Under `set -euo pipefail` a
 # failing assertion returns 1, which aborts this file with a non-zero status and
@@ -373,6 +452,14 @@ run_test test_link_repair_creates_a_missing_link
 run_test test_link_repair_rewrites_a_wrong_target
 run_test test_link_repair_narrates_to_stderr_and_keeps_stdout_byte_empty
 run_test test_link_repair_rejects_an_unknown_status
+run_test test_link_repair_backs_up_a_real_file_with_content
+run_test test_link_repair_backs_up_a_real_directory_with_content
+run_test test_link_repair_removes_an_empty_real_file_without_a_backup
+run_test test_link_repair_removes_an_empty_real_directory_without_a_backup
+run_test test_path_has_content_sees_dotfiles_in_a_directory
+run_test test_path_has_content_is_false_for_empty_paths
+run_test test_path_has_content_prints_nothing_anywhere
+run_test test_link_repair_backup_stdout_is_byte_empty
 
 # ── completeness guard ───────────────────────────────────────────────────────
 # A test function that is defined and never invoked reports success while
