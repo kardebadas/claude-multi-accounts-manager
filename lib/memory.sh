@@ -164,6 +164,24 @@ project_memory_store() {
   printf '%s\n' "$(shared_dir)/project-memory"
 }
 
+# A memory link lives at <root>/<account>/projects/<slug>/memory. From its
+# containing directory, the managed root is exactly three levels up.
+MEMORY_LINK_UPLEVELS='../../../'
+
+# memory_link_path <account> <slug> -> absolute account-side symlink path.
+# account_dir owns active-root composition, including caller-owned staging.
+memory_link_path() {
+  local account="${1:?memory_link_path: account required}"
+  local slug="${2:?memory_link_path: slug required}"
+  printf '%s\n' "$(account_dir "$account")/projects/$slug/memory"
+}
+
+# memory_link_target <slug> -> relative target from the account project dir.
+memory_link_target() {
+  local slug="${1:?memory_link_target: slug required}"
+  printf '%s\n' "${MEMORY_LINK_UPLEVELS}shared/project-memory/$slug"
+}
+
 # seed_project_memory <main_folder>
 # Copy eligible existing project memories into the active root. This function
 # composes within the caller's root (which may be a validated staging root); it
