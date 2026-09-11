@@ -14,6 +14,7 @@ make_menu_fixture() {
   MENU_BASE="$(mktemp -d "${TMPDIR:-/tmp}/cm-menu.XXXXXX")"
   export HOME="$MENU_BASE/home"
   export CLAUDE_MULTI_ROOT="$HOME/.claude-multi"
+  unset CLAUDE_MULTI_NO_UNICODE
   case "$CLAUDE_MULTI_ROOT" in
     ""|"/"|"$REAL_HOME"|"$REAL_HOME/.claude-multi"|"$REAL_HOME/.claude")
       printf 'FATAL: unsafe menu fixture root: %s\n' "$CLAUDE_MULTI_ROOT" >&2
@@ -156,6 +157,76 @@ t_render_menu_uses_unicode_without_ansi_or_stdout() {
     "the Unicode prompt is emitted to stderr"
   assert_eq "" "$(grep $'\033' "$err" || true)" \
     "the menu contains no ANSI escape sequences"
+}
+
+t_render_menu_handles_zero_accounts_under_nounset() {
+  make_menu_fixture
+  export LC_ALL=C
+  local out="$MENU_BASE/empty.out" err="$MENU_BASE/empty.err"
+  render_capture "$out" "$err"
+
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the empty-account frame leaves stdout byte-empty"
+  assert_contains "$(cat "$err")" "no accounts yet" \
+    "the empty-account frame explains how to proceed"
+  assert_contains "$(cat "$err")" "a) add" \
+    "the add action remains available with no accounts"
+  assert_contains "$(cat "$err")" "q) quit" \
+    "the quit action remains available with no accounts"
+  assert_eq "" "$(grep -E '^ +[0-9]+\)' "$err" || true)" \
+    "an empty account list emits no numbered rows"
+  assert_eq "  Select > " "$(sed -n '10p' "$err")" \
+    "the empty-account menu still ends with a usable prompt"
+}
+
+t_render_menu_keeps_all_forty_accounts_in_supplied_order_without_clipping() {
+  make_menu_fixture
+  export LC_ALL=C
+  local -a names=()
+  local pad
+  for pad in {01..39}; do
+    mk_menu_account "acct-$pad" credentials
+    names+=("acct-$pad")
+  done
+  mk_menu_account account-40-with-extra-width credentials
+  names+=(account-40-with-extra-width)
+
+  local out="$MENU_BASE/forty.out" err="$MENU_BASE/forty.err"
+  render_capture "$out" "$err" "${names[@]}"
+
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the forty-account frame leaves stdout byte-empty"
+  assert_eq "40" "$(grep -cE '^ +[0-9]+\) ' "$err")" \
+    "all forty accounts render as individual rows without paging"
+  assert_contains "$(sed -n '4p' "$err")" " 1) acct-01" \
+    "the first supplied account remains row one"
+  assert_contains "$(sed -n '23p' "$err")" "20) acct-20" \
+    "the twentieth supplied account remains row twenty"
+  assert_contains "$(sed -n '42p' "$err")" "39) acct-39" \
+    "the thirty-ninth supplied account remains row thirty-nine"
+  assert_contains "$(sed -n '43p' "$err")" "40) account-40-with-extra-width" \
+    "the long final account remains complete and last"
+}
+
+t_unicode_opt_out_forces_ascii_glyphs_in_a_utf8_locale() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  mk_menu_account work
+  export LC_ALL=C.UTF-8
+  export CLAUDE_MULTI_NO_UNICODE=1
+  local out="$MENU_BASE/ascii-opt-out.out" err="$MENU_BASE/ascii-opt-out.err"
+  render_capture "$out" "$err" personal work
+
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the ASCII opt-out frame leaves stdout byte-empty"
+  assert_contains "$(cat "$err")" "* logged in" \
+    "the opt-out uses the ASCII credentialed marker"
+  assert_contains "$(cat "$err")" "- no credentials" \
+    "the opt-out uses the ASCII missing-credential marker"
+  assert_eq "  Select > " "$(sed -n '10p' "$err")" \
+    "the opt-out uses the ASCII prompt arrow"
+  assert_eq "" "$(grep -E '[●○─▸]' "$err" || true)" \
+    "the opt-out emits no Unicode menu glyphs"
 }
 
 run_all_menu_tests() {

@@ -15,7 +15,7 @@ G_ARROW='>'
 # menu_glyphs — select Unicode glyphs for a UTF-8 locale, ASCII otherwise.
 menu_glyphs() {
   local encoding="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
-  if [[ "$encoding" == *[Uu][Tt][Ff]* ]]; then
+  if [[ "${CLAUDE_MULTI_NO_UNICODE:-}" != "1" && "$encoding" == *[Uu][Tt][Ff]* ]]; then
     G_ON='●'
     G_OFF='○'
     G_RULE='─'
