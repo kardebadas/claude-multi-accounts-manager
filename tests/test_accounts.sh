@@ -189,6 +189,62 @@ test_list_accounts_returns_zero_when_root_is_absent() {
   assert_eq "" "$out" "a missing root lists nothing"
 }
 
+test_account_status_reports_credentials_presence() {
+  fake_root >/dev/null
+  mk_account personal
+  mk_account work
+  printf '%s\n' 'not-a-real-token' > "$CLAUDE_MULTI_ROOT/personal/.credentials.json"
+  : > "$CLAUDE_MULTI_ROOT/work/.credentials.json"   # exists but empty -> not logged in
+
+  assert_eq "logged-in"      "$(account_status personal)" "non-empty credentials -> logged-in"
+  assert_eq "no-credentials" "$(account_status work)"     "empty credentials file -> no-credentials"
+  mk_account fresh
+  assert_eq "no-credentials" "$(account_status fresh)"    "absent credentials -> no-credentials"
+}
+
+test_account_status_is_exactly_the_existence_test() {
+  local body
+  body="$(sed -n '/^account_status()/,/^}/p' "$LIB_ACCOUNTS")"
+  assert_contains "$body" '[[ -s "$acct/.credentials.json" ]]'
+
+  # Every line in account_status that mentions the file must BE the -s test.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *'[[ -s "$acct/.credentials.json" ]]'*) : ;;
+      *) assert_eq "" "$line" "account_status may only existence-test the credentials file" ;;
+    esac
+  done < <(printf '%s\n' "$body" | grep -F 'credentials.json' || true)
+}
+
+test_accounts_lib_never_reads_copies_or_deletes_credentials() {
+  # No command anywhere in the library may target the credentials path.
+  local hits
+  hits="$(grep -nE '\b(cat|jq|cp|mv|rm|head|tail|awk|sed|tr|chmod|chown|source|install|rsync)\b[^#]*\.credentials\.json' "$LIB_ACCOUNTS" || true)"
+  assert_eq "" "$hits" "lib/accounts.sh must never read, parse, copy or delete .credentials.json"
+}
+
+test_credentials_references_are_limited_to_three_allowed_forms() {
+  # An explicit allowlist, so that later delete-path work cannot quietly add a
+  # fourth way of touching that filename. The three legitimate forms are:
+  #   1. the existence test in account_status (5a)
+  #   2. tar's --exclude= in archive_account (5b)
+  #   3. the archive-listing check in verify_archive (5b) -- which reads the
+  #      ARCHIVE's table of contents, never the real file
+  # delete_account removes the containing directory; that is not a
+  # path-targeted access and no line of it names the file.
+  local line trimmed
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    case "$trimmed" in
+      'if [[ -s "$acct/.credentials.json" ]]; then'*) : ;;
+      'tar --exclude=./.credentials.json --exclude=./.claude.json'*) : ;;
+      "if tar -tzf \"\$tgz\" 2>/dev/null | grep -qxF './.credentials.json'; then"*) : ;;
+      *) assert_eq "" "$trimmed" "unapproved reference to the credentials filename" ;;
+    esac
+  done < <(grep -F 'credentials.json' "$LIB_ACCOUNTS" || true)
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
