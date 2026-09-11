@@ -133,6 +133,62 @@ test_the_runner_block_reports_an_early_failing_assertion() {
             "an aborted test must not run past its failed assertion"
 }
 
+test_list_accounts_skips_reserved_and_hidden_entries() {
+  fake_root >/dev/null
+  mk_account personal
+  mk_account work
+  mk_account personal-mother
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash" \
+           "$CLAUDE_MULTI_ROOT/plugin-cache" \
+           "$CLAUDE_MULTI_ROOT/project-memory" \
+           "$CLAUDE_MULTI_ROOT/.hidden"
+  printf 'x\n' > "$CLAUDE_MULTI_ROOT/not-a-dir"
+
+  local out expected
+  out="$(list_accounts)"
+  expected="$(printf 'personal\npersonal-mother\nwork\n')"
+  assert_eq "$expected" "$out" "only real accounts are listed, sorted"
+}
+
+test_list_accounts_order_is_deterministic_and_locale_independent() {
+  # Phase 6 numbers the menu by this order and deletes by the typed number, so
+  # the order is part of the delete path's safety. Accounts are created in a
+  # deliberately non-alphabetical order, and the names are chosen so that a
+  # locale-sensitive collation (which ignores or reorders '-') would disagree
+  # with the byte-wise one: under LC_ALL=C, '-' (0x2D) sorts before every
+  # letter and digit, so 'personal-mother' precedes 'personal2' precedes
+  # 'personalx'.
+  fake_root >/dev/null
+  local n
+  for n in work personalx 0zero personal-mother alpha personal2 personal; do
+    mk_account "$n"
+  done
+
+  local expected
+  expected="$(printf '%s\n' 0zero alpha personal personal-mother personal2 personalx work)"
+  assert_eq "$expected" "$(list_accounts)" \
+            "list_accounts emits byte-wise ascending order"
+
+  # same bytes under a collating locale, and under a reversed sort environment
+  assert_eq "$expected" "$(LC_ALL=en_US.UTF-8 list_accounts)" \
+            "the order must not follow LC_COLLATE"
+  assert_eq "$expected" "$(LC_COLLATE=en_US.UTF-8 list_accounts)" \
+            "the order must not follow LC_COLLATE alone either"
+
+  # and it is stable across repeated calls (readdir order is not a contract)
+  assert_eq "$(list_accounts)" "$(list_accounts)" \
+            "two consecutive calls must agree byte for byte"
+}
+
+test_list_accounts_returns_zero_when_root_is_absent() {
+  fake_root >/dev/null
+  rm -rf "$CLAUDE_MULTI_ROOT"
+  local out rc=0
+  out="$(list_accounts)" || rc=$?
+  assert_eq "0" "$rc" "a missing root is not an error"
+  assert_eq "" "$out" "a missing root lists nothing"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
