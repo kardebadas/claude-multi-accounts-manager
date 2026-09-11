@@ -617,6 +617,121 @@ test_check_headroom_refuses_when_df_says_nothing() {
   assert_contains "$err" "cannot measure free space"
 }
 
+test_archive_account_stages_a_private_credential_free_archive() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'not-a-real-token\n' > "$CLAUDE_MULTI_ROOT/personal/.credentials.json"
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/projects/slug"
+  printf 'transcript\n' > "$CLAUDE_MULTI_ROOT/personal/projects/slug/a.jsonl"
+  printf 'prompts\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+
+  local tgz listing extracted shape="no"
+  tgz="$(archive_account personal 2>/dev/null)"
+  assert_eq "yes" "$(yesno test -f "$tgz")" \
+            "archive_account must print the path of a file it created"
+  case "$tgz" in
+    "$CLAUDE_MULTI_ROOT/.trash/personal-"*.tgz) shape="yes" ;;
+  esac
+  assert_eq "yes" "$shape" "the archive must be published under .trash"
+  assert_eq "600" "$(stat -c '%a' "$tgz")" "the archive is mode 600"
+  assert_eq "700" "$(stat -c '%a' "$CLAUDE_MULTI_ROOT/.trash")" \
+            ".trash is mode 700"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '.tmp.*' -print)" \
+            "successful publication must leave no staging artifact"
+
+  listing="$(tar -tzf "$tgz")"
+  assert_eq "" "$(printf '%s\n' "$listing" | grep -F 'credentials.json' || true)" \
+            "the archive must NOT contain .credentials.json"
+  assert_eq "" "$(printf '%s\n' "$listing" | grep -F '.claude.json' || true)" \
+            "the archive must NOT contain .claude.json"
+  assert_contains "$listing" "history.jsonl"
+  assert_contains "$listing" "projects/slug/a.jsonl"
+
+  extracted="$(mktemp -d "${TMPDIR:-/tmp}/cm-archive.XXXXXX")"
+  tar -xzf "$tgz" -C "$extracted"
+  assert_link "$extracted/CLAUDE.md" "../shared/CLAUDE.md"
+  rm -rf -- "$extracted"
+
+  assert_eq "not-a-real-token" \
+            "$(cat "$CLAUDE_MULTI_ROOT/personal/.credentials.json")" \
+            "archiving must not alter the live credentials"
+  assert_eq '{"hasCompletedOnboarding":true,"projects":{}}' \
+            "$(cat "$CLAUDE_MULTI_ROOT/personal/.claude.json")" \
+            "archiving must not alter the live stub"
+  assert_eq "transcript" \
+            "$(cat "$CLAUDE_MULTI_ROOT/personal/projects/slug/a.jsonl")" \
+            "archiving must leave account data untouched"
+}
+
+test_archive_account_cleans_staging_when_tar_fails() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+
+  # The stub creates a partial file at tar's requested output path before
+  # failing. This proves cleanup without relying on permission behavior under
+  # root, and catches implementations that expose the final name to tar.
+  tar() {
+    local arg output="" take_next=0
+    for arg in "$@"; do
+      if (( take_next )); then
+        output="$arg"
+        break
+      fi
+      if [[ "$arg" == "-czf" ]]; then
+        take_next=1
+      fi
+    done
+    if [[ -n "$output" ]]; then
+      printf 'partial archive\n' > "$output"
+    fi
+    return 2
+  }
+
+  local out_file err_file out err rc=0
+  out_file="$(mktemp "${TMPDIR:-/tmp}/cm-archive-out.XXXXXX")"
+  err_file="$(mktemp "${TMPDIR:-/tmp}/cm-archive-err.XXXXXX")"
+  set +e
+  archive_account personal >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+  out="$(cat "$out_file")"
+  err="$(cat "$err_file")"
+  rm -f -- "$out_file" "$err_file"
+
+  assert_eq "1" "$rc" "a tar failure must fail the archive"
+  assert_eq "" "$out" "a failed archive must not publish a path"
+  assert_contains "$err" "backup failed"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '.tmp.*' -print)" \
+            "a failed tar must leave no staging artifact"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '*.tgz' -print)" \
+            "a failed tar must leave no final archive"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "the account must survive a failed archive"
+}
+
+test_archive_account_cleans_staging_when_atomic_rename_fails() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'history\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  mv() { return 1; }
+
+  local rc=0 out err
+  out="$(archive_account personal 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "an atomic rename failure must fail the archive"
+  assert_eq "" "$out" "a failed rename must not publish a path"
+
+  rc=0
+  err="$(archive_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "the rename failure remains non-zero"
+  assert_contains "$err" "backup failed"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '.tmp.*' -print)" \
+            "a failed rename must clean the staging archive"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '*.tgz' -print)" \
+            "a failed rename must never expose a final archive"
+  assert_eq "history" "$(cat "$CLAUDE_MULTI_ROOT/personal/history.jsonl")" \
+            "the account must survive a failed rename"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #

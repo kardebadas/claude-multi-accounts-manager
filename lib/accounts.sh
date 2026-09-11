@@ -243,3 +243,51 @@ check_headroom() {
   fi
   return 0
 }
+
+# archive_account — A14, A30. Build the private archive under a temporary name
+# on .trash's filesystem, then publish it with one atomic rename. The live
+# account is never modified. Symlinks are archived as symlinks: tar is not
+# given -h/--dereference, so shared data is not copied into the account backup.
+archive_account() {
+  local name="${1:?archive_account needs an account name}"
+  local root acct trash ts tmp final
+  root="$(multi_root)"
+  acct="$root/$name"
+  trash="$root/.trash"
+
+  if ! mkdir -p "$trash"; then
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! chmod 700 "$trash"; then
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! ts="$(date -u +%Y%m%dT%H%M%SZ)" || [[ -z "$ts" ]]; then
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+
+  final="$trash/$name-$ts.tgz"
+  tmp="$trash/.tmp.$name-$ts.$$.tgz"
+
+  if ! ( umask 077
+         tar --exclude=./.credentials.json --exclude=./.claude.json \
+             -czf "$tmp" -C "$acct" . ); then
+    rm -f -- "$tmp"
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! chmod 600 "$tmp"; then
+    rm -f -- "$tmp"
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! mv -- "$tmp" "$final"; then
+    rm -f -- "$tmp"
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+
+  printf '%s\n' "$final"
+}
