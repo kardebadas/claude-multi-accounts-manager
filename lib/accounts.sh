@@ -130,3 +130,20 @@ describe_account() {
   log "  size:        $size"
   log "  credentials: $creds"
 }
+
+# confirm_exact_name — A13. Typing the account name is the only confirmation.
+# A bare 'y' is explicitly not accepted.
+confirm_exact_name() {
+  local name="${1:?confirm_exact_name needs an account name}" reply
+  printf "type the account name '%s' to confirm deletion: " "$name" >&2
+  if ! IFS= read -r reply; then
+    printf '\n' >&2
+    log "aborted: no input"
+    return 1
+  fi
+  if [[ "$reply" == "$name" ]]; then
+    return 0
+  fi
+  log "aborted: '$reply' does not match '$name'"
+  return 1
+}
