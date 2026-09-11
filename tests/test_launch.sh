@@ -186,6 +186,7 @@ read_env_record() {
 # A test-only library seam lets the next argv-contract task mutate a private
 # copy without ever changing the working tree.
 LAUNCH_LIB="${LAUNCH_LIB:-$REPO_ROOT/lib/launch.sh}"
+CLAUDE_MULTI_ENTRYPOINT="${CLAUDE_MULTI_ENTRYPOINT:-$REPO_ROOT/bin/claude-multi}"
 
 # launch_in_subshell <record-prefix> <account> [claude-args...]
 # `exec` replaces only this child. The identity guard runs inside it after the
@@ -230,7 +231,7 @@ entrypoint_in_subshell() {
     export PATH="$(stub_bin_dir):$PATH"
     export FAKE_CLAUDE_LOG="$rec"
     require_fake_claude_wiring "$REPO_ROOT/tests/fake-claude"
-    exec "$REPO_ROOT/bin/claude-multi" "$@"
+    exec "$CLAUDE_MULTI_ENTRYPOINT" "$@"
   )
 }
 
@@ -622,6 +623,26 @@ test_dispatch_with_no_arguments_enters_the_menu() {
   assert_contains "$err" "personal" "the menu must list the account"
   assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
     "EOF at the menu must not launch Claude"
+}
+
+# The complete wrapper path must contribute no bytes before the silent Claude
+# stub takes over. A single newline here would already corrupt a downstream
+# parser in `claude-multi work -p ... | consumer`.
+test_wrapper_launch_stdout_is_byte_empty_before_claude_output() {
+  mk_root
+  mk_account work
+  local rec="$TMP/wrapper-stdout"
+  unset FAKE_CLAUDE_STDOUT
+
+  assert_stdout_empty_bytes entrypoint_in_subshell "$rec" work -p 'hello'
+
+  assert_link "$CLAUDE_MULTI_ROOT/work/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_link "$CLAUDE_MULTI_ROOT/work/agents" "../shared/agents"
+  assert_eq "2" "$(rec_argc "$rec")" "the silent stub must have received the launch argv"
+  assert_eq "-p" "$(rec_arg "$rec" 0)"
+  assert_eq "hello" "$(rec_arg "$rec" 1)"
+  assert_eq "$CLAUDE_MULTI_ROOT/work" \
+    "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" "the complete wrapper must launch work"
 }
 
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an
