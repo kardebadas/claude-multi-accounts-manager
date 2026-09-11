@@ -1051,7 +1051,7 @@ test_purge_account_has_exactly_one_structurally_guarded_recursive_rm() {
   body="$(sed -n '/^purge_account()/,/^}/p' "$LIB_ACCOUNTS")"
   assert_contains "$body" 'validate_name'
   assert_contains "$body" 'is_reserved_name'
-  assert_contains "$body" 'validate_root_path'
+  assert_contains "$body" '_resolve_managed_root'
   assert_contains "$body" '[[ -L "$target" ]]'
   assert_contains "$body" '[[ ! -d "$target" ]]'
 
@@ -1396,6 +1396,260 @@ test_account_operations_leave_the_runner_protected_root_unchanged() {
 
   assert_eq "no" "$(yesno test -e "$protected_root")" \
             "account operations must not create or mutate the protected root"
+}
+
+test_archive_refuses_a_symlinked_trash_without_touching_its_target() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'history\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local base="${HOME%/home}" rc=0 out mode
+  local external="$base/external-trash"
+  mkdir -p "$external"
+  chmod 755 "$external"
+  printf 'outside sentinel\n' > "$external/sentinel"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/.trash"
+  mode="$(stat -c '%a' "$external")"
+
+  out="$(archive_account personal 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "archive must refuse a symlinked trash directory"
+  assert_eq "" "$out" "a refused archive must not publish a path"
+  assert_eq "$mode" "$(stat -c '%a' "$external")" \
+            "archive refusal must not chmod the external target"
+  assert_eq "sentinel" "$(find "$external" -maxdepth 1 -type f -printf '%f\n')" \
+            "archive refusal must not write into the external target"
+}
+
+test_prune_refuses_a_symlinked_trash_without_removing_external_archives() {
+  fake_root >/dev/null
+  local base="${HOME%/home}" rc=0 out
+  local external="$base/external-trash"
+  mkdir -p "$external"
+  printf 'old\n' > "$external/personal-20260101T000000Z.tgz"
+  printf 'new\n' > "$external/personal-20260202T000000Z.tgz"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/.trash"
+
+  out="$(prune_trash 1 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "prune must refuse a symlinked trash directory"
+  assert_eq "" "$out" "a refused prune must keep stdout empty"
+  assert_eq "personal-20260101T000000Z.tgz
+personal-20260202T000000Z.tgz" \
+            "$(find "$external" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)" \
+            "prune refusal must preserve every external archive"
+}
+
+test_delete_refuses_a_symlinked_trash_before_purge_or_external_mutation() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'history\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local base="${HOME%/home}"
+  local external="$base/external-trash"
+  local purge_marker="$base/purge.called" rc=0 out mode
+  mkdir -p "$external"
+  chmod 755 "$external"
+  printf 'outside\n' > "$external/personal-20260101T000000Z.tgz"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/.trash"
+  mode="$(stat -c '%a' "$external")"
+  purge_account() { printf 'called\n' > "$purge_marker"; return 0; }
+
+  out="$(CLAUDE_MULTI_TRASH_KEEP=1 feed personal delete_account personal 2>/dev/null)" \
+    || rc=$?
+  assert_eq "1" "$rc" "composed deletion must refuse a symlinked trash directory"
+  assert_eq "" "$out" "the composed refusal must keep stdout empty"
+  assert_eq "no" "$(yesno test -e "$purge_marker")" \
+            "trash refusal must happen before purge"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "the live account must remain after trash refusal"
+  assert_eq "$mode" "$(stat -c '%a' "$external")" \
+            "composed refusal must not chmod the external target"
+  assert_eq "outside" "$(cat "$external/personal-20260101T000000Z.tgz")" \
+            "composed refusal must not prune or overwrite external data"
+}
+
+test_trash_guard_rejects_a_symlinked_root_and_non_directory_trash() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local base="${HOME%/home}" real_root="$CLAUDE_MULTI_ROOT" rc=0 out
+  ln -s "$real_root" "$base/root-link"
+  CLAUDE_MULTI_ROOT="$base/root-link"
+  out="$(check_headroom personal 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "trash preparation must reject a symlinked managed root"
+  assert_eq "" "$out" "a symlinked-root refusal keeps stdout empty"
+  assert_eq "no" "$(yesno test -e "$real_root/.trash")" \
+            "a symlinked root must be refused before creating trash"
+
+  fake_root >/dev/null
+  printf 'not a directory\n' > "$CLAUDE_MULTI_ROOT/.trash"
+  rc=0
+  prune_trash 1 >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "prune must reject a non-directory trash path"
+  assert_eq "not a directory" "$(cat "$CLAUDE_MULTI_ROOT/.trash")" \
+            "a non-directory trash path must remain untouched"
+}
+
+test_archive_revalidates_trash_after_timestamp_before_staging() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'history\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash"
+  local base="${HOME%/home}" rc=0 out
+  local external="$base/external-trash"
+  mkdir -p "$external"
+  printf 'sentinel\n' > "$external/sentinel"
+  date() {
+    mv -- "$CLAUDE_MULTI_ROOT/.trash" "$CLAUDE_MULTI_ROOT/.trash-safe"
+    ln -s "$external" "$CLAUDE_MULTI_ROOT/.trash"
+    printf '20260911T000000Z\n'
+  }
+
+  out="$(archive_account personal 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "archive must revalidate trash after obtaining its timestamp"
+  assert_eq "" "$out" "a raced archive must not publish a path"
+  assert_eq "sentinel" "$(find "$external" -maxdepth 1 -type f -printf '%f\n')" \
+            "a raced trash symlink must receive no staging or final archive"
+}
+
+test_verification_cleanup_revalidates_trash_before_removal() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local base="${HOME%/home}" rc=0
+  local external="$base/external-trash"
+  mkdir -p "$external" "$CLAUDE_MULTI_ROOT/.trash"
+  archive_account() {
+    local archive="$CLAUDE_MULTI_ROOT/.trash/personal-fixed.tgz"
+    printf 'safe archive\n' > "$archive"
+    mv -- "$CLAUDE_MULTI_ROOT/.trash" "$CLAUDE_MULTI_ROOT/.trash-safe"
+    ln -s "$external" "$CLAUDE_MULTI_ROOT/.trash"
+    printf 'external sentinel\n' > "$external/personal-fixed.tgz"
+    printf '%s\n' "$archive"
+  }
+  verify_archive() { return 1; }
+  account_in_use() { return 1; }
+
+  feed personal delete_account personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "failed verification must still refuse deletion"
+  assert_eq "external sentinel" "$(cat "$external/personal-fixed.tgz")" \
+            "cleanup must not follow a raced trash symlink"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "unsafe cleanup must leave the live account intact"
+}
+
+test_prune_revalidates_trash_before_every_removal() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash" base="${HOME%/home}"
+  local external="$base/external-trash" moved="$base/original-trash"
+  local swap_marker="$base/swapped" n rc=0
+  mkdir -p "$trash" "$external"
+  for n in 20260101T000000Z 20260202T000000Z 20260303T000000Z; do
+    printf 'inside %s\n' "$n" > "$trash/personal-$n.tgz"
+    printf 'outside %s\n' "$n" > "$external/personal-$n.tgz"
+  done
+  rm() {
+    local target="${*: -1}"
+    if [[ ! -e "$swap_marker" ]]; then
+      command rm -f -- "$target"
+      mv -- "$trash" "$moved"
+      ln -s "$external" "$trash"
+      printf 'swapped\n' > "$swap_marker"
+      return 0
+    fi
+    command rm "$@"
+  }
+
+  prune_trash 1 >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "prune must fail when trash changes between removals"
+  assert_eq "personal-20260101T000000Z.tgz
+personal-20260202T000000Z.tgz
+personal-20260303T000000Z.tgz" \
+            "$(find "$external" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)" \
+            "each removal must revalidate before touching an external target"
+}
+
+test_lsof_fallback_uses_a_recursive_argument_sensitive_probe() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty stub calls rc=0 err
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  stub="$empty/lsof-stub"
+  calls="$empty/calls"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" > "$CM_LSOF_CALLS"' \
+    '[[ $# -eq 3 && "$1" == -t && "$2" == +D && "$3" == "$CM_LSOF_DIR" ]] || exit 2' \
+    'printf "4242\n"' > "$stub"
+  chmod 700 "$stub"
+
+  err="$(CM_LSOF_CALLS="$calls" CM_LSOF_DIR="$CLAUDE_MULTI_ROOT/personal" \
+         CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF="$stub" \
+         account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a recursive lsof descendant hit means in-use"
+  assert_eq "-t +D $CLAUDE_MULTI_ROOT/personal" "$(cat "$calls")" \
+            "lsof must receive its supported recursive account-tree form"
+  assert_contains "$err" "4242"
+  assert_eq "" "$(printf '%s\n' "$err" | grep -F "$CLAUDE_MULTI_ROOT" || true)" \
+            "lsof diagnostics must not print captured paths"
+  rm -rf -- "$empty"
+}
+
+test_real_lsof_fallback_detects_a_nested_open_file_when_available() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '  SKIP: lsof is not installed here\n' >&2
+    return 0
+  fi
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local nested="$CLAUDE_MULTI_ROOT/personal/projects/slug/live-file"
+  local ready="$CLAUDE_MULTI_ROOT/holder.ready" empty pid tries=0 rc=0 err
+  mkdir -p "${nested%/*}"
+  printf 'held data\n' > "$nested"
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  bash -c 'exec 9<"$1"; printf ready > "$2"; sleep 30' _ "$nested" "$ready" &
+  pid=$!
+  trap "kill '$pid' 2>/dev/null || true; wait '$pid' 2>/dev/null || true" EXIT
+  while [[ ! -f "$ready" && $tries -lt 1000 ]]; do
+    tries=$(( tries + 1 ))
+  done
+
+  err="$(CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF=lsof \
+         account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  trap - EXIT
+  rm -rf -- "$empty"
+
+  assert_eq "0" "$rc" "real lsof must detect a process holding a nested account file"
+  assert_contains "$err" "$pid"
+  assert_eq "" "$(printf '%s\n' "$err" | grep -F "$nested" || true)" \
+            "the nested lsof path must never be printed"
+}
+
+test_headroom_compares_huge_decimal_measurements_without_overflow() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local DU_BLOCKS DF_BLOCKS rc=0 err out
+  du() { printf '%s\t%s\n' "$DU_BLOCKS" "$CLAUDE_MULTI_ROOT/personal"; }
+  df() {
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n'
+    printf '/fake 1 0 %s 0%% /fake\n' "$DF_BLOCKS"
+  }
+
+  DU_BLOCKS=9223372036854775808
+  DF_BLOCKS=0
+  err="$(check_headroom personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "overflow-sized need with zero free space must refuse"
+  assert_contains "$err" "18446744073709551616K"
+
+  DU_BLOCKS=999999999999999999999999999999
+  DF_BLOCKS=1999999999999999999999999999998
+  rc=0
+  out="$(check_headroom personal 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "an exact huge 2x boundary must pass"
+  assert_eq "" "$out" "a huge successful comparison keeps stdout empty"
+
+  DF_BLOCKS=1999999999999999999999999999997
+  rc=0
+  err="$(check_headroom personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "one block below a huge 2x boundary must refuse"
+  assert_contains "$err" "1999999999999999999999999999998K"
+  assert_stdout_empty_bytes check_headroom personal
 }
 
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────

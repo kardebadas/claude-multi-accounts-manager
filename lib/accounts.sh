@@ -148,6 +148,160 @@ confirm_exact_name() {
   return 1
 }
 
+# _resolve_managed_root — resolve the one safe, real managed-root directory.
+# The result is returned through _SAFE_MANAGED_ROOT so guard functions remain
+# silent on stdout. Both trash operations and the final purge use this path;
+# keeping one resolver prevents their containment rules from drifting apart.
+_resolve_managed_root() {
+  local root resolved_root home_root
+  _SAFE_MANAGED_ROOT=""
+  root="$(multi_root)"
+
+  if ! validate_root_path "$root"; then
+    log "refusing operation: unsafe managed root '$root'"
+    return 1
+  fi
+  case "$root" in
+    ""|"/"|"$HOME")
+      log "refusing operation: unsafe managed root '$root'"
+      return 1
+      ;;
+  esac
+  if [[ -L "$root" || ! -d "$root" ]]; then
+    log "refusing operation: managed root '$root' is not a real directory"
+    return 1
+  fi
+  if ! resolved_root="$(readlink -f -- "$root" 2>/dev/null)" \
+     || [[ -z "$resolved_root" ]]; then
+    log "refusing operation: cannot resolve managed root '$root'"
+    return 1
+  fi
+  if ! home_root="$(readlink -f -- "$HOME" 2>/dev/null)" \
+     || [[ -z "$home_root" ]]; then
+    log "refusing operation: cannot resolve HOME"
+    return 1
+  fi
+  case "$resolved_root" in
+    ""|"/"|"$home_root")
+      log "refusing operation: unsafe resolved root '$resolved_root'"
+      return 1
+      ;;
+  esac
+  _SAFE_MANAGED_ROOT="$resolved_root"
+}
+
+# _prepare_trash_dir [create|existing|optional] — validate the physical trash
+# directory and expose its canonical path through _SAFE_TRASH_DIR. `create`
+# may create the literal child after the root itself is proven safe; `optional`
+# returns 2 for an absent trash directory so pruning can retain its no-op case.
+_prepare_trash_dir() {
+  local mode="${1:-existing}" root trash resolved_trash
+  _SAFE_TRASH_DIR=""
+  if ! _resolve_managed_root; then
+    return 1
+  fi
+  root="$_SAFE_MANAGED_ROOT"
+  trash="$root/.trash"
+
+  if [[ -L "$trash" ]]; then
+    log "refusing operation: trash path '$trash' is a symlink"
+    return 1
+  fi
+  if [[ ! -e "$trash" ]]; then
+    case "$mode" in
+      create)
+        if ! mkdir -- "$trash"; then
+          log "refusing operation: cannot create trash directory '$trash'"
+          return 1
+        fi
+        ;;
+      optional) return 2 ;;
+      existing)
+        log "refusing operation: trash directory '$trash' does not exist"
+        return 1
+        ;;
+      *)
+        log "refusing operation: invalid trash guard mode '$mode'"
+        return 1
+        ;;
+    esac
+  fi
+  if [[ -L "$trash" || ! -d "$trash" ]]; then
+    log "refusing operation: trash path '$trash' is not a real directory"
+    return 1
+  fi
+  if ! resolved_trash="$(readlink -f -- "$trash" 2>/dev/null)" \
+     || [[ -z "$resolved_trash" ]]; then
+    log "refusing operation: cannot resolve trash directory '$trash'"
+    return 1
+  fi
+  if [[ "$resolved_trash" != "$root/.trash" ]]; then
+    log "refusing operation: trash directory resolves outside the managed root"
+    return 1
+  fi
+  _SAFE_TRASH_DIR="$resolved_trash"
+}
+
+# _remove_safe_trash_file <path> — best-effort cleanup only after revalidating
+# the current trash directory. The candidate must be one literal child; a
+# changed symlink is safer to leave untouched than to follow during cleanup.
+_remove_safe_trash_file() {
+  local candidate="${1:-}" trash
+  if ! _prepare_trash_dir existing; then
+    return 1
+  fi
+  trash="$_SAFE_TRASH_DIR"
+  case "$candidate" in
+    "$trash"/*)
+      if [[ "${candidate#"$trash"/}" == */* ]]; then
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  rm -f -- "$candidate"
+}
+
+# Decimal helpers keep filesystem measurements out of Bash's signed integer
+# evaluator. Inputs become one canonical digit string, doubling is bounded to
+# one digit plus carry, and comparison uses only length then byte order.
+_decimal_canonicalize() {
+  local value="${1:-}"
+  _DECIMAL_VALUE=""
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  while [[ ${#value} -gt 1 && "${value:0:1}" == "0" ]]; do
+    value="${value:1}"
+  done
+  _DECIMAL_VALUE="$value"
+}
+
+_decimal_double() {
+  local value="${1:-}" out="" digit doubled carry=0 idx
+  _DECIMAL_VALUE=""
+  for (( idx=${#value} - 1; idx >= 0; idx-- )); do
+    digit="${value:idx:1}"
+    doubled=$(( 10#$digit * 2 + carry ))
+    out="$(( doubled % 10 ))$out"
+    carry=$(( doubled / 10 ))
+  done
+  if (( carry )); then
+    out="$carry$out"
+  fi
+  _DECIMAL_VALUE="$out"
+}
+
+_decimal_less_than() {
+  local left="$1" right="$2"
+  local LC_ALL=C
+  if (( ${#left} != ${#right} )); then
+    (( ${#left} < ${#right} ))
+    return
+  fi
+  [[ "$left" < "$right" ]]
+}
+
 # account_in_use — A36.1. Is any live process using this account as its
 # CLAUDE_CONFIG_DIR? rc 0 = yes (PIDs logged), rc 1 = no, rc 2 = the check
 # could not run. rc 2 is NOT "no": delete_account refuses on it.
@@ -183,7 +337,7 @@ account_in_use() {
   fi
 
   if command -v "$lsof_cmd" >/dev/null 2>&1; then
-    if lsof_output="$("$lsof_cmd" -t -- "$dir" 2>/dev/null)"; then
+    if lsof_output="$("$lsof_cmd" -t +D "$dir" 2>/dev/null)"; then
       lsof_rc=0
     else
       lsof_rc=$?
@@ -213,31 +367,37 @@ account_in_use() {
 check_headroom() {
   local name="${1:?check_headroom needs an account name}"
   local root trash need avail want
-  root="$(multi_root)"
-  trash="$root/.trash"
-  mkdir -p "$trash"
+  if ! _prepare_trash_dir create; then
+    log "refusing to delete '$name': cannot prepare a safe trash directory"
+    return 1
+  fi
+  root="$_SAFE_MANAGED_ROOT"
+  trash="$_SAFE_TRASH_DIR"
 
   if need="$(du -sk -- "$root/$name" 2>/dev/null | awk 'NR==1{print $1}')"; then
     :
   else
     need=""
   fi
-  if [[ ! "$need" =~ ^[0-9]+$ ]]; then
+  if ! _decimal_canonicalize "$need"; then
     log "refusing to delete '$name': cannot measure account size under $root"
     return 1
   fi
-  want=$(( need * 2 ))
+  need="$_DECIMAL_VALUE"
+  _decimal_double "$need"
+  want="$_DECIMAL_VALUE"
 
   if avail="$(df -Pk -- "$trash" 2>/dev/null | awk 'NR==2{print $4}')"; then
     :
   else
     avail=""
   fi
-  if [[ ! "$avail" =~ ^[0-9]+$ ]]; then
+  if ! _decimal_canonicalize "$avail"; then
     log "refusing to delete '$name': cannot measure free space under $trash"
     return 1
   fi
-  if (( avail < want )); then
+  avail="$_DECIMAL_VALUE"
+  if _decimal_less_than "$avail" "$want"; then
     log "refusing to delete '$name': the backup wants ${want}K (2x the ${need}K account) under $trash, only ${avail}K free"
     return 1
   fi
@@ -251,11 +411,15 @@ check_headroom() {
 archive_account() {
   local name="${1:?archive_account needs an account name}"
   local root acct trash ts tmp final
-  root="$(multi_root)"
+  if ! _prepare_trash_dir create; then
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  root="$_SAFE_MANAGED_ROOT"
   acct="$root/$name"
-  trash="$root/.trash"
+  trash="$_SAFE_TRASH_DIR"
 
-  if ! mkdir -p "$trash"; then
+  if ! _prepare_trash_dir existing || [[ "$_SAFE_TRASH_DIR" != "$trash" ]]; then
     log "backup failed; account '$name' was NOT deleted"
     return 1
   fi
@@ -271,20 +435,34 @@ archive_account() {
   final="$trash/$name-$ts.tgz"
   tmp="$trash/.tmp.$name-$ts.$$.tgz"
 
+  if ! _prepare_trash_dir existing || [[ "$_SAFE_TRASH_DIR" != "$trash" ]]; then
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
   if ! ( umask 077
          tar --exclude=./.credentials.json --exclude=./.claude.json \
              -czf "$tmp" -C "$acct" . ); then
-    rm -f -- "$tmp"
+    _remove_safe_trash_file "$tmp" || true
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! _prepare_trash_dir existing || [[ "$_SAFE_TRASH_DIR" != "$trash" ]]; then
+    _remove_safe_trash_file "$tmp" || true
     log "backup failed; account '$name' was NOT deleted"
     return 1
   fi
   if ! chmod 600 "$tmp"; then
-    rm -f -- "$tmp"
+    _remove_safe_trash_file "$tmp" || true
+    log "backup failed; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! _prepare_trash_dir existing || [[ "$_SAFE_TRASH_DIR" != "$trash" ]]; then
+    _remove_safe_trash_file "$tmp" || true
     log "backup failed; account '$name' was NOT deleted"
     return 1
   fi
   if ! mv -- "$tmp" "$final"; then
-    rm -f -- "$tmp"
+    _remove_safe_trash_file "$tmp" || true
     log "backup failed; account '$name' was NOT deleted"
     return 1
   fi
@@ -335,7 +513,7 @@ verify_archive() {
 # resolved trash directory are candidates; symlinks, directories and unrelated
 # entries are never counted or removed.
 prune_trash() {
-  local keep trash f idx total retained=0
+  local keep trash f idx total retained=0 trash_rc=0
   local LC_ALL=C
   local -a archives=()
 
@@ -353,10 +531,14 @@ prune_trash() {
     return 1
   fi
 
-  trash="$(trash_dir)"
-  if [[ ! -d "$trash" ]]; then
+  _prepare_trash_dir optional || trash_rc=$?
+  if (( trash_rc == 2 )); then
     return 0
   fi
+  if (( trash_rc != 0 )); then
+    return 1
+  fi
+  trash="$_SAFE_TRASH_DIR"
   for f in "$trash"/*.tgz; do
     if [[ -f "$f" && ! -L "$f" ]]; then
       archives+=("$f")
@@ -387,6 +569,14 @@ prune_trash() {
         return 1
         ;;
     esac
+    if ! _prepare_trash_dir existing || [[ "$_SAFE_TRASH_DIR" != "$trash" ]]; then
+      log "refusing to prune because the trash directory changed"
+      return 1
+    fi
+    if [[ ! -f "$f" || -L "$f" ]]; then
+      log "refusing to prune changed archive entry: ${f##*/}"
+      return 1
+    fi
     if ! rm -f -- "$f"; then
       log "could not prune old backup: ${f##*/}"
       return 1
@@ -400,7 +590,7 @@ prune_trash() {
 # is made canonical before the target is composed, and the only rm receives the
 # literal canonical-root/canonical-name path.
 purge_account() {
-  local raw="${1:-}" name root resolved_root home_root target
+  local raw="${1:-}" name root target
 
   if ! validate_name "$raw"; then
     log "refusing to delete: '$raw' is not a valid account name"
@@ -412,42 +602,11 @@ purge_account() {
     return 1
   fi
 
-  root="$(multi_root)"
-  if ! validate_root_path "$root"; then
-    log "refusing to delete: unsafe managed root '$root'"
+  if ! _resolve_managed_root; then
+    log "refusing to delete: unsafe managed root"
     return 1
   fi
-  case "$root" in
-    ""|"/"|"$HOME")
-      log "refusing to delete: unsafe managed root '$root'"
-      return 1
-      ;;
-  esac
-  if [[ -L "$root" ]]; then
-    log "refusing to delete: managed root '$root' is a symlink"
-    return 1
-  fi
-  if [[ ! -d "$root" ]]; then
-    log "refusing to delete: managed root '$root' is not a directory"
-    return 1
-  fi
-  if ! resolved_root="$(readlink -f -- "$root" 2>/dev/null)" \
-     || [[ -z "$resolved_root" ]]; then
-    log "refusing to delete: cannot resolve managed root '$root'"
-    return 1
-  fi
-  if ! home_root="$(readlink -f -- "$HOME" 2>/dev/null)" \
-     || [[ -z "$home_root" ]]; then
-    log "refusing to delete: cannot resolve HOME"
-    return 1
-  fi
-  root="$resolved_root"
-  case "$root" in
-    ""|"/"|"$home_root")
-      log "refusing to delete: unsafe resolved root '$root'"
-      return 1
-      ;;
-  esac
+  root="$_SAFE_MANAGED_ROOT"
 
   target="$root/$name"
   if [[ -L "$target" ]]; then
@@ -469,7 +628,7 @@ purge_account() {
 # Every check before purge leaves the live account untouched. If the archive
 # cannot be verified, remove only the archive created by this invocation.
 delete_account() {
-  local raw="${1:-}" name root acct archive trash use_rc=0
+  local raw="${1:-}" name root acct archive use_rc=0
 
   if ! validate_name "$raw"; then
     log "refusing to delete: '$raw' is not a valid account name"
@@ -511,17 +670,9 @@ delete_account() {
     return 1
   fi
   if ! verify_archive "$archive"; then
-    trash="$(trash_dir)"
-    case "$archive" in
-      "$trash"/*.tgz)
-        if ! rm -f -- "$archive"; then
-          log "could not remove the unverified backup: $archive"
-        fi
-        ;;
-      *)
-        log "refusing to remove an unverified archive outside $trash: $archive"
-        ;;
-    esac
+    if ! _remove_safe_trash_file "$archive"; then
+      log "could not safely remove the unverified backup: $archive"
+    fi
     log "backup could not be verified; account '$name' was NOT deleted"
     return 1
   fi
