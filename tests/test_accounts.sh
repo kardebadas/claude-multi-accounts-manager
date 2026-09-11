@@ -952,6 +952,117 @@ test_prune_trash_handles_a_huge_canonical_keep_without_arithmetic_overflow() {
             "a huge keep count must not trigger arithmetic pruning"
 }
 
+test_purge_account_removes_only_the_literal_validated_account() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  add_account work 2>/dev/null
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/projects/slug"
+  printf 'private account data\n' > "$CLAUDE_MULTI_ROOT/personal/projects/slug/history.jsonl"
+
+  local rc=0 out
+  out="$(purge_account personal 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a real validated account directory may be purged"
+  assert_eq "" "$out" "purge_account writes nothing to stdout"
+  assert_eq "no" "$(yesno test -e "$CLAUDE_MULTI_ROOT/personal")" \
+            "purge must remove the selected account directory"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/work")" \
+            "purge must not touch another account"
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+            "purge must not follow the account's links into shared"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/shared/agents")" \
+            "shared directories must survive"
+}
+
+test_purge_account_refuses_reserved_invalid_missing_and_non_directory_targets() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local n rc out
+
+  for n in shared .trash plugin-cache project-memory '' '..' '../../etc' \
+           'no space' under_score '-leading' 'unicodé'; do
+    rc=0
+    out="$(purge_account "$n" 2>/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "purge_account must refuse '$n'"
+    assert_eq "" "$out" "a purge refusal must not touch stdout"
+  done
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+            "shared was damaged by a refused purge"
+
+  rc=0
+  purge_account ghost >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a nonexistent account is refused"
+
+  printf 'not a directory\n' > "$CLAUDE_MULTI_ROOT/ordinary-file"
+  rc=0
+  purge_account ordinary-file >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a regular-file target is refused"
+
+  ln -s "$CLAUDE_MULTI_ROOT/shared" "$CLAUDE_MULTI_ROOT/sneaky"
+  rc=0
+  purge_account sneaky >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a symlinked account target is refused"
+  assert_eq "yes" "$(yesno test -L "$CLAUDE_MULTI_ROOT/sneaky")" \
+            "the refused target symlink must remain"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "no refusal may delete an unrelated account"
+}
+
+test_purge_account_refuses_unsafe_or_ambiguous_roots_before_removal() {
+  local base
+  fake_root >/dev/null
+  base="${HOME%/home}"
+  add_account personal 2>/dev/null
+  mkdir -p "$HOME/child" "$HOME/personal"
+  printf 'home sentinel\n' > "$HOME/personal/sentinel"
+  printf 'not a root directory\n' > "$HOME/root-file"
+  ln -s "$CLAUDE_MULTI_ROOT" "$base/root-link"
+
+  # Intercept rm in this refusal-only test so even a mutant missing every guard
+  # cannot target /personal or another non-fixture path during the RED phase.
+  local rm_calls="$base/rm.calls"
+  rm() {
+    printf 'called\n' >> "$rm_calls"
+    return 0
+  }
+  multi_root() {
+    printf '%s\n' "$PURGE_TEST_ROOT"
+  }
+
+  local unsafe rc out
+  for unsafe in '' / "$HOME" relative/root "$HOME/child/.." \
+                "$HOME/missing-root" "$HOME/root-file" "$base/root-link"; do
+    PURGE_TEST_ROOT="$unsafe"
+    rc=0
+    out="$(purge_account personal 2>/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "unsafe root '$unsafe' must be refused"
+    assert_eq "" "$out" "an unsafe-root refusal must keep stdout empty"
+  done
+
+  assert_eq "no" "$(yesno test -e "$rm_calls")" \
+            "no unsafe or ambiguous root may reach rm"
+  assert_eq "home sentinel" "$(cat "$HOME/personal/sentinel")" \
+            "a root resolving to HOME must not delete a HOME child"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "a symlinked root refusal must leave its target account intact"
+}
+
+test_purge_account_has_exactly_one_structurally_guarded_recursive_rm() {
+  local body recursive exact
+  body="$(sed -n '/^purge_account()/,/^}/p' "$LIB_ACCOUNTS")"
+  assert_contains "$body" 'validate_name'
+  assert_contains "$body" 'is_reserved_name'
+  assert_contains "$body" 'validate_root_path'
+  assert_contains "$body" '[[ -L "$target" ]]'
+  assert_contains "$body" '[[ ! -d "$target" ]]'
+
+  recursive="$(grep -cE '\brm[[:space:]]+-rf\b' "$LIB_ACCOUNTS" || true)"
+  exact="$(printf '%s\n' "$body" | grep -cF 'rm -rf -- "$root/$name"' || true)"
+  assert_eq "1" "$recursive" \
+            "accounts must contain exactly one recursive removal"
+  assert_eq "1" "$exact" \
+            "the only recursive removal must use the literal validated root/name path"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
