@@ -239,7 +239,7 @@ test_credentials_references_are_limited_to_three_allowed_forms() {
     case "$trimmed" in
       'if [[ -s "$acct/.credentials.json" ]]; then'*) : ;;
       'tar --exclude=./.credentials.json --exclude=./.claude.json'*) : ;;
-      "if tar -tzf \"\$tgz\" 2>/dev/null | grep -qxF './.credentials.json'; then"*) : ;;
+      "if printf '%s\\n' \"\$listing\" | grep -qxF './.credentials.json'; then"*) : ;;
       *) assert_eq "" "$trimmed" "unapproved reference to the credentials filename" ;;
     esac
   done < <(grep -F 'credentials.json' "$LIB_ACCOUNTS" || true)
@@ -730,6 +730,106 @@ test_archive_account_cleans_staging_when_atomic_rename_fails() {
             "a failed rename must never expose a final archive"
   assert_eq "history" "$(cat "$CLAUDE_MULTI_ROOT/personal/history.jsonl")" \
             "the account must survive a failed rename"
+}
+
+test_verify_archive_accepts_a_good_archive_without_rereading_it() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'prompts\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local tgz rc=0 out
+  tgz="$(archive_account personal 2>/dev/null)"
+
+  out="$(verify_archive "$tgz" 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a freshly written archive verifies"
+  assert_eq "" "$out" "archive verification writes nothing to stdout"
+
+  # A one-call tar seam protects the single-read contract independently of the
+  # real-archive checks above and below. A verifier that lists the archive once
+  # per check turns this literal call count into a failure.
+  local probe="$CLAUDE_MULTI_ROOT/.trash/probe.tgz"
+  local calls="$CLAUDE_MULTI_ROOT/.trash/tar.calls"
+  printf 'nonempty\n' > "$probe"
+  tar() {
+    printf 'call\n' >> "$calls"
+    printf './\n./history.jsonl\n'
+  }
+  verify_archive "$probe" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "one successful full listing is sufficient"
+  assert_eq "1" "$(wc -l < "$calls" | tr -d '[:space:]')" \
+            "verify_archive must read an untrusted archive only once"
+}
+
+test_verify_archive_rejects_missing_and_empty_archives() {
+  fake_root >/dev/null
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash"
+  local missing="$CLAUDE_MULTI_ROOT/.trash/missing.tgz"
+  local empty="$CLAUDE_MULTI_ROOT/.trash/empty.tgz"
+  : > "$empty"
+
+  local path rc err out
+  for path in "$missing" "$empty"; do
+    rc=0
+    err="$(verify_archive "$path" 2>&1 >/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "a missing or empty archive must fail closed"
+    assert_contains "$err" "missing or empty"
+
+    rc=0
+    out="$(verify_archive "$path" 2>/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "the missing or empty result remains non-zero"
+    assert_eq "" "$out" "archive verification failures must not touch stdout"
+  done
+}
+
+test_verify_archive_rejects_a_truncated_archive() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  head -c 200000 /dev/zero | tr '\0' 'z' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local tgz size half rc=0 err
+  tgz="$(archive_account personal 2>/dev/null)"
+  size="$(stat -c '%s' "$tgz")"
+  half=$(( size / 2 ))
+  head -c "$half" "$tgz" > "$tgz.part"
+  mv -- "$tgz.part" "$tgz"
+
+  err="$(verify_archive "$tgz" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a truncated archive must NOT verify"
+  assert_contains "$err" "unreadable or truncated"
+}
+
+test_verify_archive_rejects_an_archive_carrying_excluded_files() {
+  fake_root >/dev/null
+  local creds_src="$CLAUDE_MULTI_ROOT/bad-creds-src"
+  local stub_src="$CLAUDE_MULTI_ROOT/bad-stub-src"
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash" "$creds_src" "$stub_src"
+  printf 'not-a-real-token\n' > "$creds_src/.credentials.json"
+  printf 'history\n' > "$creds_src/history.jsonl"
+  printf '{}\n' > "$stub_src/.claude.json"
+  printf 'history\n' > "$stub_src/history.jsonl"
+
+  local bad_creds="$CLAUDE_MULTI_ROOT/.trash/credentials-bad.tgz"
+  local bad_stub="$CLAUDE_MULTI_ROOT/.trash/stub-bad.tgz"
+  tar -czf "$bad_creds" -C "$creds_src" .
+  tar -czf "$bad_stub" -C "$stub_src" .
+
+  local bad rc err
+  for bad in "$bad_creds" "$bad_stub"; do
+    rc=0
+    err="$(verify_archive "$bad" 2>&1 >/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "each excluded file must independently fail verification"
+    assert_contains "$err" "contains an excluded file"
+  done
+}
+
+test_verify_archive_rejects_an_implausibly_empty_archive() {
+  fake_root >/dev/null
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash" "$CLAUDE_MULTI_ROOT/empty-src"
+  local empty="$CLAUDE_MULTI_ROOT/.trash/implausible.tgz"
+  tar -czf "$empty" -C "$CLAUDE_MULTI_ROOT/empty-src" .
+
+  local rc=0 err
+  err="$(verify_archive "$empty" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a one-entry archive must NOT verify"
+  assert_contains "$err" "too few entries"
 }
 
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
