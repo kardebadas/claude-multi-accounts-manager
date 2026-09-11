@@ -309,6 +309,43 @@ test_add_account_warns_but_completes_when_memory_sync_returns_one() {
             "the onboarding stub must remain available"
 }
 
+test_add_account_refuses_an_existing_name() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'sentinel\n' > "$CLAUDE_MULTI_ROOT/personal/.claude.json"
+
+  local rc=0 err
+  err="$(add_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a second add of the same name fails"
+  assert_contains "$err" "already exists"
+  assert_eq "sentinel" "$(cat "$CLAUDE_MULTI_ROOT/personal/.claude.json")" \
+            "the existing account must not be overwritten"
+}
+
+test_add_account_refuses_reserved_names() {
+  fake_root >/dev/null
+  local n rc
+  for n in shared .trash plugin-cache project-memory; do
+    rc=0
+    add_account "$n" >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "add_account must refuse the reserved name '$n'"
+  done
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" "shared/CLAUDE.md was disturbed"
+  assert_eq "no" "$(yesno test -e "$CLAUDE_MULTI_ROOT/shared/.claude.json")" "a stub leaked into shared/"
+}
+
+test_add_account_refuses_invalid_names() {
+  fake_root >/dev/null
+  local n rc
+  for n in "" "-leading" ".dotted" "has space" "under_score" "Ünicode" \
+           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "path/traversal" ".." ; do
+    rc=0
+    add_account "$n" >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "add_account must refuse the invalid name '$n'"
+  done
+  assert_eq "" "$(list_accounts)" "no invalid name created a directory"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
