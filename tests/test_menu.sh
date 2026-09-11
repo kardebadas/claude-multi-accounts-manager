@@ -311,6 +311,113 @@ t_menu_q_quits_without_launching_or_writing_stdout() {
     "quit leaves stdout byte-empty"
 }
 
+t_menu_invalid_choices_warn_redraw_then_allow_a_valid_selection() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/invalid"
+  local out="$MENU_BASE/invalid.out" err="$MENU_BASE/invalid.err" rc
+  rc="$(menu_drive $'zz\n0\n99\n-1\n1\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "the menu recovers and launches after invalid choices"
+  assert_contains "$(cat "$err")" "invalid selection: 'zz'" \
+    "non-numeric input is rejected on stderr"
+  assert_contains "$(cat "$err")" "invalid selection: '0'" \
+    "zero is rejected as out of range"
+  assert_contains "$(cat "$err")" "invalid selection: '99'" \
+    "a number above the list is rejected"
+  assert_contains "$(cat "$err")" "invalid selection: '-1'" \
+    "a negative choice is rejected before arithmetic"
+  assert_eq "5" "$(grep -c 'Claude accounts' "$err")" \
+    "the menu redraws after each rejected choice and before the accepted one"
+  assert_eq "[personal]" "$(recorded_launch_args "$record")" \
+    "invalid choices never change the later valid delegation"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "invalid-choice warnings never leak to stdout"
+}
+
+t_menu_eof_exits_once_without_spinning_or_leaking_stdout() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local out="$MENU_BASE/eof.out" err="$MENU_BASE/eof.err" rc
+  set +e
+  timeout 5 bash -c '
+    set -euo pipefail
+    repo_root="$1"
+    . "$repo_root/lib/util.sh"
+    . "$repo_root/lib/config.sh"
+    . "$repo_root/lib/accounts.sh"
+    . "$repo_root/lib/menu.sh"
+    launch_account() { exit 97; }
+    menu_loop </dev/null
+  ' _ "$REPO_ROOT" >"$out" 2>"$err"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "EOF exits zero rather than spinning until timeout"
+  assert_eq "1" "$(grep -c 'Claude accounts' "$err")" \
+    "the menu renders exactly once before EOF"
+  assert_eq "9" "$(wc -l < "$err" | tr -d '[:space:]')" \
+    "EOF closes the unterminated prompt line on stderr"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "EOF handling leaves stdout byte-empty"
+}
+
+t_menu_invalid_input_then_eof_warns_and_terminates() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/invalid-eof"
+  local out="$MENU_BASE/invalid-eof.out" err="$MENU_BASE/invalid-eof.err" rc
+  rc="$(menu_drive $'nope\nalso-nope\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "input exhaustion after invalid choices ends the loop"
+  assert_contains "$(cat "$err")" "invalid selection: 'nope'" \
+    "the first exhausted-stream choice is judged"
+  assert_contains "$(cat "$err")" "invalid selection: 'also-nope'" \
+    "the final line before EOF is judged"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "invalid input followed by EOF never launches"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "invalid input followed by EOF leaves stdout byte-empty"
+}
+
+t_menu_accepts_non_tty_piped_input_without_terminal_controls() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/non-tty"
+  local out="$MENU_BASE/non-tty.out" err="$MENU_BASE/non-tty.err" rc
+  rc="$(menu_drive $'1\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "piped non-TTY input is a supported selection source"
+  assert_eq "[personal]" "$(recorded_launch_args "$record")" \
+    "a piped selection delegates normally"
+  assert_eq "" "$(grep $'\033' "$err" || true)" \
+    "non-TTY rendering emits no terminal escape sequences"
+  assert_eq "" "$(grep -i 'requires a terminal' "$err" || true)" \
+    "the menu does not reject a non-TTY input stream"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "non-TTY selection leaves stdout byte-empty"
+}
+
+t_menu_zero_accounts_rejects_number_without_array_underflow() {
+  make_menu_fixture
+  export LC_ALL=C
+  local record="$MENU_BASE/zero-choice"
+  local out="$MENU_BASE/zero-choice.out" err="$MENU_BASE/zero-choice.err" rc
+  rc="$(menu_drive $'1\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "an out-of-range choice with no accounts does not abort"
+  assert_contains "$(cat "$err")" "invalid selection: '1'" \
+    "one is rejected when the stable account list is empty"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "an empty list cannot accidentally delegate a launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "empty-list rejection and quit leave stdout byte-empty"
+}
+
 run_all_menu_tests() {
   local fn test_status status=0 ran=0
   while IFS= read -r fn; do
