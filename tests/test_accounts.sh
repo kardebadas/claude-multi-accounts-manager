@@ -1621,6 +1621,127 @@ test_real_lsof_fallback_detects_a_nested_open_file_when_available() {
             "the nested lsof path must never be printed"
 }
 
+test_lsof_fallback_fails_closed_when_traversal_is_incomplete() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty stub find_calls lsof_calls rc=0 err out
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  stub="$empty/lsof-stub"
+  find_calls="$empty/find-calls"
+  lsof_calls="$empty/lsof-calls"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "called\n" >> "$CM_LSOF_CALLS"' \
+    'exit 1' > "$stub"
+  chmod 700 "$stub"
+
+  # A shell-function stub keeps this deterministic without adding a public
+  # command seam. Failures on calls 1 and 2 exercise both sides of the lsof
+  # probe so a mid-scan permission change cannot be accepted as "free".
+  find() {
+    local call=0
+    IFS= read -r call < "$find_calls" || true
+    call=$(( call + 1 ))
+    printf '%s\n' "$call" > "$find_calls"
+    if [[ "$call" == "$CM_FIND_FAIL_ON" ]]; then
+      return 2
+    fi
+    return 0
+  }
+  export CLAUDE_MULTI_PROC="$empty"
+  export CLAUDE_MULTI_LSOF="$stub"
+  export CM_LSOF_CALLS="$lsof_calls"
+
+  printf '0\n' > "$find_calls"
+  export CM_FIND_FAIL_ON=1
+  err="$(account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "a pre-probe traversal failure must be undeterminable"
+  assert_contains "$err" "could not determine"
+  assert_eq "no" "$(yesno test -e "$lsof_calls")" \
+            "lsof must not run after the completeness pre-check fails"
+
+  printf '0\n' > "$find_calls"
+  export CM_FIND_FAIL_ON=2
+  rc=0
+  err="$(account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "a post-probe traversal failure must be undeterminable"
+  assert_eq "2" "$(cat "$find_calls")" \
+            "the recursive probe must be bracketed by completeness checks"
+  assert_contains "$err" "could not determine"
+  assert_eq "" "$(printf '%s\n' "$err" | grep -F "$CLAUDE_MULTI_ROOT" || true)" \
+            "traversal diagnostics must not disclose filesystem paths"
+
+  printf '0\n' > "$find_calls"
+  rc=0
+  out="$(delete_account personal </dev/null 2>"$empty/delete.err")" || rc=$?
+  assert_eq "1" "$rc" "deletion must refuse an incomplete recursive probe"
+  assert_eq "" "$out" "a traversal refusal must leave stdout empty"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "a traversal refusal must leave the account intact"
+  assert_contains "$(cat "$empty/delete.err")" "could not determine"
+  assert_eq "" "$(grep -F "type the account name" "$empty/delete.err" || true)" \
+            "deletion must stop before confirmation when use is unknown"
+
+  printf '0\n' > "$find_calls"
+  export CM_FIND_FAIL_ON=1
+  assert_stdout_empty_bytes account_in_use personal
+  rm -rf -- "$empty"
+}
+
+test_real_unreadable_descendant_makes_lsof_result_undeterminable_when_supported() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '  SKIP: lsof is not installed here\n' >&2
+    return 0
+  fi
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local blocked="$CLAUDE_MULTI_ROOT/personal/projects/unreadable-child"
+  local nested="$blocked/live-file" ready="$CLAUDE_MULTI_ROOT/holder.ready"
+  local empty pid tries=0 rc=0 delete_rc=0 err delete_err out
+  mkdir -p "$blocked"
+  printf 'held data\n' > "$nested"
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  bash -c 'exec 9<"$1"; printf ready > "$2"; sleep 30' _ "$nested" "$ready" &
+  pid=$!
+  trap "chmod 700 '$blocked' 2>/dev/null || true; kill '$pid' 2>/dev/null || true; wait '$pid' 2>/dev/null || true" EXIT
+  while [[ ! -f "$ready" && $tries -lt 1000 ]]; do
+    tries=$(( tries + 1 ))
+  done
+  chmod 000 "$blocked"
+
+  if find "$CLAUDE_MULTI_ROOT/personal" -type d -print >/dev/null 2>&1; then
+    chmod 700 "$blocked"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    trap - EXIT
+    rm -rf -- "$empty"
+    printf '  SKIP: this user can traverse mode-000 descendants\n' >&2
+    return 0
+  fi
+
+  export CLAUDE_MULTI_PROC="$empty"
+  export CLAUDE_MULTI_LSOF=lsof
+  err="$(account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_stdout_empty_bytes account_in_use personal
+  delete_err="$(delete_account personal </dev/null 2>&1 >/dev/null)" || delete_rc=$?
+  out="$(test -d "$CLAUDE_MULTI_ROOT/personal" && printf present)"
+
+  chmod 700 "$blocked"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  trap - EXIT
+  rm -rf -- "$empty"
+
+  assert_eq "2" "$rc" "an unreadable descendant must make the lsof result unknown"
+  assert_contains "$err" "could not determine"
+  assert_eq "" "$(printf '%s\n' "$err" | grep -F "$CLAUDE_MULTI_ROOT" || true)" \
+            "the unreadable descendant path must not be disclosed"
+  assert_eq "1" "$delete_rc" "deletion must refuse an incomplete recursive probe"
+  assert_contains "$delete_err" "could not determine"
+  assert_eq "" "$(printf '%s\n' "$delete_err" | grep -F "type the account name" || true)" \
+            "deletion must refuse before confirmation when traversal is incomplete"
+  assert_eq "present" "$out" "refused deletion must leave the account intact"
+}
+
 test_headroom_compares_huge_decimal_measurements_without_overflow() {
   fake_root >/dev/null
   add_account personal 2>/dev/null

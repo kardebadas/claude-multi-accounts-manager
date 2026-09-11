@@ -337,6 +337,14 @@ account_in_use() {
   fi
 
   if command -v "$lsof_cmd" >/dev/null 2>&1; then
+    # lsof +D reports status 1 both for a complete no-hit scan and for some
+    # incomplete traversals. Establish completeness independently before the
+    # probe, then check it again before accepting an empty result as free.
+    if ! find "$dir" -type d -print >/dev/null 2>&1; then
+      log "could not determine whether '$name' is in use: account tree traversal failed"
+      log "  refusing to delete rather than guessing"
+      return 2
+    fi
     if lsof_output="$("$lsof_cmd" -t +D "$dir" 2>/dev/null)"; then
       lsof_rc=0
     else
@@ -346,6 +354,11 @@ account_in_use() {
       hits="${lsof_output//$'\n'/ }"
       log "refusing: account '$name' has open files held by pid(s): $hits"
       return 0
+    fi
+    if ! find "$dir" -type d -print >/dev/null 2>&1; then
+      log "could not determine whether '$name' is in use: account tree traversal failed"
+      log "  refusing to delete rather than guessing"
+      return 2
     fi
     if (( lsof_rc == 0 || lsof_rc == 1 )); then
       return 1
