@@ -37,6 +37,8 @@ source "$CLAUDE_MULTI_LIB/seed.sh"
 source "$CLAUDE_MULTI_LIB/memory.sh"
 # shellcheck source=../lib/accounts.sh
 source "$CLAUDE_MULTI_LIB/accounts.sh"
+# shellcheck source=../lib/launch.sh
+source "$CLAUDE_MULTI_LIB/launch.sh"
 
 usage() {
   cat >&2 <<'USAGE'
