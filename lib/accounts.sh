@@ -291,3 +291,41 @@ archive_account() {
 
   printf '%s\n' "$final"
 }
+
+# verify_archive — A36.2. Read the completed archive back before any account is
+# destroyed. One captured table-of-contents read supplies every check: a tar
+# error cannot be hidden by a later pipeline, and an untrusted archive is never
+# opened repeatedly. This examines archive metadata only, never a live file.
+verify_archive() {
+  local tgz="${1:?verify_archive needs an archive path}"
+  local listing entry count=0
+
+  if [[ ! -r "$tgz" || ! -s "$tgz" ]]; then
+    log "backup verification failed: $tgz is missing or empty"
+    return 1
+  fi
+  if ! listing="$(tar -tzf "$tgz" 2>/dev/null)"; then
+    log "backup verification failed: $tgz is unreadable or truncated"
+    return 1
+  fi
+
+  if [[ -n "$listing" ]]; then
+    while IFS= read -r entry; do
+      count=$(( count + 1 ))
+    done <<< "$listing"
+  fi
+  if (( count < 2 )); then
+    log "backup verification failed: $tgz has too few entries ($count)"
+    return 1
+  fi
+
+  if printf '%s\n' "$listing" | grep -qxF './.credentials.json'; then
+    log "backup verification failed: $tgz contains an excluded file"
+    return 1
+  fi
+  if printf '%s\n' "$listing" | grep -qxF './.claude.json'; then
+    log "backup verification failed: $tgz contains an excluded file"
+    return 1
+  fi
+  return 0
+}
