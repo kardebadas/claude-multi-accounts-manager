@@ -147,3 +147,61 @@ confirm_exact_name() {
   log "aborted: '$reply' does not match '$name'"
   return 1
 }
+
+# account_in_use — A36.1. Is any live process using this account as its
+# CLAUDE_CONFIG_DIR? rc 0 = yes (PIDs logged), rc 1 = no, rc 2 = the check
+# could not run. rc 2 is NOT "no": delete_account refuses on it.
+#
+# Own-uid /proc/<pid>/environ is matched line-by-line and never printed because
+# process environments can contain secrets. If /proc is unavailable, lsof is
+# the fail-closed fallback.
+account_in_use() {
+  local name="${1:?account_in_use needs an account name}"
+  local procdir="${CLAUDE_MULTI_PROC:-/proc}"
+  local lsof_cmd="${CLAUDE_MULTI_LSOF:-lsof}"
+  local root dir p pid hits="" lsof_output="" lsof_rc=0
+
+  root="$(multi_root)"
+  dir="$root/$name"
+
+  if [[ -d "$procdir" && -r "$procdir/self/environ" ]]; then
+    for p in "$procdir"/[0-9]*; do
+      if [[ ! -r "$p/environ" ]]; then continue; fi
+      pid="${p##*/}"
+      if [[ "$pid" == "$$" ]]; then continue; fi
+      if tr '\0' '\n' < "$p/environ" 2>/dev/null \
+         | grep -qxF "CLAUDE_CONFIG_DIR=$dir"; then
+        hits="$hits $pid"
+      fi
+    done
+    if [[ -n "$hits" ]]; then
+      log "refusing: account '$name' is in use by pid(s):$hits"
+      log "  close those sessions first; there is no override for this check"
+      return 0
+    fi
+    return 1
+  fi
+
+  if command -v "$lsof_cmd" >/dev/null 2>&1; then
+    if lsof_output="$("$lsof_cmd" -t -- "$dir" 2>/dev/null)"; then
+      lsof_rc=0
+    else
+      lsof_rc=$?
+    fi
+    if [[ -n "$lsof_output" ]]; then
+      hits="${lsof_output//$'\n'/ }"
+      log "refusing: account '$name' has open files held by pid(s): $hits"
+      return 0
+    fi
+    if (( lsof_rc == 0 || lsof_rc == 1 )); then
+      return 1
+    fi
+    log "could not determine whether '$name' is in use: $lsof_cmd failed with status $lsof_rc"
+    log "  refusing to delete rather than guessing"
+    return 2
+  fi
+
+  log "could not determine whether '$name' is in use: no readable $procdir and no $lsof_cmd"
+  log "  refusing to delete rather than guessing"
+  return 2
+}
