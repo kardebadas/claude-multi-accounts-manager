@@ -1323,6 +1323,81 @@ test_delete_account_stage_order_is_structural() {
   assert_eq "yes" "$(yesno test "$purge" -lt "$prune")" "purge precedes pruning"
 }
 
+test_entry_point_sources_memory_then_accounts_once_and_exports_the_surface() {
+  local bin="$REPO_ROOT/bin/claude-multi" sources rc=0
+  sources="$(grep -E '^source "\$CLAUDE_MULTI_LIB/(memory|accounts)\.sh"$' "$bin" || true)"
+  assert_eq 'source "$CLAUDE_MULTI_LIB/memory.sh"
+source "$CLAUDE_MULTI_LIB/accounts.sh"' "$sources" \
+            "the entry point must source memory then accounts exactly once"
+
+  bash -c 'set -euo pipefail
+    source "$1"
+    for f in list_accounts account_status add_account offer_launch \
+             describe_account confirm_exact_name account_in_use check_headroom \
+             archive_account verify_archive prune_trash purge_account \
+             delete_account; do
+      declare -F "$f" >/dev/null \
+        || { printf "missing: %s\n" "$f" >&2; exit 1; }
+    done' _ "$bin" || rc=$?
+  assert_eq "0" "$rc" "the sourced entry point exports the complete account surface"
+}
+
+test_entry_point_account_wiring_is_canonical_and_credential_free() {
+  local bin="$REPO_ROOT/bin/claude-multi" hits
+  hits="$(grep -nE 'CM_LIB|LIB_DIR|\.credentials\.json' "$bin" || true)"
+  assert_eq "" "$hits" \
+            "entrypoint wiring must use CLAUDE_MULTI_LIB without credential handling"
+}
+
+test_no_account_cli_verbs_were_introduced() {
+  local bin="$REPO_ROOT/bin/claude-multi" hits
+  hits="$(grep -nE '^[[:space:]]*(add|delete|sync|doctor)\)' "$bin" || true)"
+  assert_eq "" "$hits" "add/delete/sync/doctor must never become argv verbs"
+}
+
+test_accounts_lib_never_repairs_from_doctor() {
+  local hits
+  hits="$(grep -nE '(^|[^[:alnum:]_])doctor(_report)?[[:space:]]*\(' \
+                 "$LIB_ACCOUNTS" || true)"
+  assert_eq "" "$hits" "lib/accounts.sh must not invoke a doctor repair path"
+  assert_contains "$(cat "$LIB_ACCOUNTS")" 'heal_account "$name"'
+}
+
+test_account_channels_keep_mutators_empty_and_data_producers_visible() {
+  fake_root >/dev/null
+  assert_stdout_empty_bytes add_account personal
+  CLAUDE_MULTI_NO_LAUNCH=1
+  assert_stdout_empty_bytes offer_launch personal
+  unset CLAUDE_MULTI_NO_LAUNCH
+  assert_stdout_empty_bytes describe_account personal
+  assert_stdout_empty_bytes check_headroom personal
+  assert_stdout_empty_bytes prune_trash 3
+
+  assert_eq "personal" "$(list_accounts)" "list_accounts returns data on stdout"
+  assert_eq "no-credentials" "$(account_status personal)" \
+            "account_status returns its status word on stdout"
+  printf 'prompts\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local tgz
+  tgz="$(archive_account personal 2>/dev/null)"
+  assert_eq "yes" "$(yesno test -f "$tgz")" \
+            "archive_account returns its archive path on stdout"
+  assert_stdout_empty_bytes feed personal delete_account personal
+}
+
+test_account_operations_leave_the_runner_protected_root_unchanged() {
+  local protected_root="$REAL_HOME/.claude-multi"
+  assert_eq "no" "$(yesno test -e "$protected_root")" \
+            "the runner's protected root starts absent"
+
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'fixture data\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  printf 'personal\n' | delete_account personal >/dev/null 2>&1
+
+  assert_eq "no" "$(yesno test -e "$protected_root")" \
+            "account operations must not create or mutate the protected root"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
