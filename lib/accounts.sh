@@ -464,3 +464,75 @@ purge_account() {
     return 1
   fi
 }
+
+# delete_account — compose the destructive workflow in one fail-closed order.
+# Every check before purge leaves the live account untouched. If the archive
+# cannot be verified, remove only the archive created by this invocation.
+delete_account() {
+  local raw="${1:-}" name root acct archive trash use_rc=0
+
+  if ! validate_name "$raw"; then
+    log "refusing to delete: '$raw' is not a valid account name"
+    return 1
+  fi
+  name="$CANONICAL_NAME"
+  if is_reserved_name "$name"; then
+    log "refusing to delete the reserved name '$name'"
+    return 1
+  fi
+
+  root="$(multi_root)"
+  acct="$root/$name"
+  if [[ ! -d "$acct" || -L "$acct" ]]; then
+    log "no such account: '$name'"
+    return 1
+  fi
+
+  account_in_use "$name" || use_rc=$?
+  if (( use_rc == 0 )); then
+    log "account '$name' is in use; refusing to delete"
+    return 1
+  fi
+  if (( use_rc != 1 )); then
+    log "could not determine whether account '$name' is in use; refusing to delete"
+    return 1
+  fi
+
+  if ! describe_account "$name"; then
+    return 1
+  fi
+  if ! confirm_exact_name "$name"; then
+    return 1
+  fi
+  if ! check_headroom "$name"; then
+    return 1
+  fi
+  if ! archive="$(archive_account "$name")"; then
+    return 1
+  fi
+  if ! verify_archive "$archive"; then
+    trash="$(trash_dir)"
+    case "$archive" in
+      "$trash"/*.tgz)
+        if ! rm -f -- "$archive"; then
+          log "could not remove the unverified backup: $archive"
+        fi
+        ;;
+      *)
+        log "refusing to remove an unverified archive outside $trash: $archive"
+        ;;
+    esac
+    log "backup could not be verified; account '$name' was NOT deleted"
+    return 1
+  fi
+  if ! purge_account "$name"; then
+    log "account '$name' was NOT deleted; verified backup kept at $archive"
+    return 1
+  fi
+  if ! prune_trash; then
+    log "account '$name' was deleted, but old backups could not be pruned"
+    return 1
+  fi
+
+  log "deleted '$name'; backup: $archive (credentials and .claude.json excluded)"
+}
