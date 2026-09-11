@@ -394,3 +394,73 @@ prune_trash() {
     log "pruned old backup: ${f##*/}"
   done
 }
+
+# purge_account — the only recursive account deletion. Revalidate every input
+# here immediately before removal so no caller can weaken the guard. The root
+# is made canonical before the target is composed, and the only rm receives the
+# literal canonical-root/canonical-name path.
+purge_account() {
+  local raw="${1:-}" name root resolved_root home_root target
+
+  if ! validate_name "$raw"; then
+    log "refusing to delete: '$raw' is not a valid account name"
+    return 1
+  fi
+  name="$CANONICAL_NAME"
+  if is_reserved_name "$name"; then
+    log "refusing to delete the reserved name '$name'"
+    return 1
+  fi
+
+  root="$(multi_root)"
+  if ! validate_root_path "$root"; then
+    log "refusing to delete: unsafe managed root '$root'"
+    return 1
+  fi
+  case "$root" in
+    ""|"/"|"$HOME")
+      log "refusing to delete: unsafe managed root '$root'"
+      return 1
+      ;;
+  esac
+  if [[ -L "$root" ]]; then
+    log "refusing to delete: managed root '$root' is a symlink"
+    return 1
+  fi
+  if [[ ! -d "$root" ]]; then
+    log "refusing to delete: managed root '$root' is not a directory"
+    return 1
+  fi
+  if ! resolved_root="$(readlink -f -- "$root" 2>/dev/null)" \
+     || [[ -z "$resolved_root" ]]; then
+    log "refusing to delete: cannot resolve managed root '$root'"
+    return 1
+  fi
+  if ! home_root="$(readlink -f -- "$HOME" 2>/dev/null)" \
+     || [[ -z "$home_root" ]]; then
+    log "refusing to delete: cannot resolve HOME"
+    return 1
+  fi
+  root="$resolved_root"
+  case "$root" in
+    ""|"/"|"$home_root")
+      log "refusing to delete: unsafe resolved root '$root'"
+      return 1
+      ;;
+  esac
+
+  target="$root/$name"
+  if [[ -L "$target" ]]; then
+    log "refusing to delete: '$target' is a symlink, not an account directory"
+    return 1
+  fi
+  if [[ ! -d "$target" ]]; then
+    log "refusing to delete: '$target' is not an account directory"
+    return 1
+  fi
+
+  if ! rm -rf -- "$root/$name"; then
+    log "could not delete account '$name' at $target"
+    return 1
+  fi
+}
