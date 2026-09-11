@@ -183,6 +183,42 @@ read_env_record() {
   done < "$1.env"
 }
 
+# A test-only library seam lets the next argv-contract task mutate a private
+# copy without ever changing the working tree.
+LAUNCH_LIB="${LAUNCH_LIB:-$REPO_ROOT/lib/launch.sh}"
+
+# launch_in_subshell <record-prefix> <account> [claude-args...]
+# `exec` replaces only this child. The identity guard runs inside it after the
+# final PATH assignment, immediately before any launch code can dispatch.
+launch_in_subshell() {
+  local rec="$1"
+  shift
+  (
+    set -euo pipefail
+    export PATH="$(stub_bin_dir):$PATH"
+    export FAKE_CLAUDE_LOG="$rec"
+    require_fake_claude_wiring "$REPO_ROOT/tests/fake-claude"
+    . "$REPO_ROOT/lib/util.sh"
+    . "$REPO_ROOT/lib/config.sh"
+    . "$REPO_ROOT/lib/links.sh"
+    . "$REPO_ROOT/lib/memory.sh"
+    if [[ -n "${LAUNCH_REPAIR_TRACE:-}" ]]; then
+      heal_account() {
+        printf 'heal\n' >> "$LAUNCH_REPAIR_TRACE"
+        return "${LAUNCH_HEAL_RC:-0}"
+      }
+      sync_project_memory() {
+        printf 'sync\n' >> "$LAUNCH_REPAIR_TRACE"
+        return "${LAUNCH_SYNC_RC:-0}"
+      }
+    fi
+    . "$LAUNCH_LIB"
+    launch_account "$@"
+    printf 'FATAL: launch_account returned after a successful Claude invocation\n' >&2
+    return 98
+  )
+}
+
 test_fixture_guard_refuses_real_home_and_root() {
   local rc=0 err
   set +e
@@ -283,6 +319,127 @@ test_stub_stdout_knob_and_invalid_exit_are_byte_exact() {
     "invalid exit validation must happen before stdout"
   assert_eq "256" "$(cat "$rec.rejected")"
   assert_contains "$(cat "$err")" "FAKE_CLAUDE_EXIT must be an integer 0-255"
+}
+
+test_entrypoint_sources_the_launch_library() {
+  local rc=0
+  set +e
+  (
+    unset -f launch_account 2>/dev/null || true
+    . "$REPO_ROOT/bin/claude-multi"
+    declare -F launch_account >/dev/null
+  )
+  rc=$?
+  set -e
+  assert_eq "0" "$rc" "sourcing the entrypoint must export launch_account"
+}
+
+test_launch_sets_env_preserves_home_pwd_and_execs_the_stub() {
+  mk_root
+  mk_account work
+  local rec="$TMP/launch-env" caller="$TMP/caller" out="$TMP/launch-env.out" rc=0
+  mkdir -p "$caller"
+  set +e
+  (
+    cd "$caller"
+    launch_in_subshell "$rec" work --resume
+  ) > "$out" 2> "$TMP/launch-env.err"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "the launch must end with the stub's success status"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "a silent Claude launch must add no stdout bytes"
+  assert_eq "1" "$(rec_argc "$rec")" "the PATH-selected stub must execute"
+  assert_eq "--resume" "$(rec_arg "$rec" 0)"
+  read_env_record "$rec"
+  assert_eq "4" "${#REC_ENV_ENTRIES[@]}"
+  assert_eq "CLAUDE_CONFIG_DIR=$CLAUDE_MULTI_ROOT/work" "${REC_ENV_ENTRIES[0]}"
+  assert_eq "CLAUDE_CODE_PLUGIN_CACHE_DIR=$CLAUDE_MULTI_ROOT/shared/plugin-cache" \
+    "${REC_ENV_ENTRIES[1]}"
+  assert_eq "HOME=$HOME" "${REC_ENV_ENTRIES[2]}" "launch must preserve HOME"
+  assert_eq "PWD=$caller" "${REC_ENV_ENTRIES[3]}" "launch must preserve PWD"
+}
+
+test_launch_validates_and_uses_the_canonical_account_name() {
+  mk_root
+  mk_account work
+  local rec="$TMP/canonical" rc=0 err
+  set +e
+  err="$(launch_in_subshell "$rec" WORK 2>&1 >/dev/null)"
+  rc=$?
+  set -e
+  assert_eq "0" "$rc" "uppercase input must launch its canonical account"
+  assert_contains "$err" "lowercase"
+  assert_contains "$err" "using 'work'"
+  assert_eq "$CLAUDE_MULTI_ROOT/work" \
+    "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)"
+}
+
+test_launch_rejects_invalid_and_unknown_accounts_before_exec() {
+  mk_root
+  mk_account work
+  local invalid="$TMP/invalid-account" unknown="$TMP/unknown-account"
+  local rc=0 err out
+
+  set +e
+  out="$(launch_in_subshell "$invalid" '../work' 2> "$TMP/invalid-account.err")"
+  rc=$?
+  set -e
+  assert_eq "1" "$rc" "invalid account grammar must be rejected"
+  assert_eq "" "$out" "invalid input must leave stdout empty"
+  assert_eq "no" "$(if [[ -e "$invalid.argv" ]]; then printf yes; else printf no; fi)" \
+    "invalid input must not reach Claude"
+
+  rc=0
+  set +e
+  err="$(launch_in_subshell "$unknown" missing 2>&1 >/dev/null)"
+  rc=$?
+  set -e
+  assert_eq "1" "$rc" "a valid but absent account must be rejected"
+  assert_contains "$err" "unknown account"
+  assert_contains "$err" "missing"
+  assert_eq "no" "$(if [[ -e "$unknown.argv" ]]; then printf yes; else printf no; fi)" \
+    "an unknown account must not reach Claude"
+}
+
+test_launch_heals_and_syncs_before_exec() {
+  mk_root
+  mk_account work
+  local rec="$TMP/repairs" rc=0
+  set +e
+  launch_in_subshell "$rec" work >/dev/null 2> "$TMP/repairs.err"
+  rc=$?
+  set -e
+  assert_eq "0" "$rc"
+  assert_link "$CLAUDE_MULTI_ROOT/work/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_link "$CLAUDE_MULTI_ROOT/work/agents" "../shared/agents"
+  assert_eq "no" "$(if [[ -L "$CLAUDE_MULTI_ROOT/work/security" ]]; then printf yes; else printf no; fi)" \
+    "security must never be linked"
+  assert_eq "yes" "$(if [[ -f "$rec.argv" && -f "$rec.env" ]]; then printf yes; else printf no; fi)" \
+    "the stub sidecars must exist after repairs"
+  assert_eq "0" "$(rec_argc "$rec")" "a zero-argument launch remains valid"
+}
+
+test_launch_warns_but_continues_when_both_repairs_fail() {
+  mk_root
+  mk_account work
+  local rec="$TMP/repair-fail" trace="$TMP/repair.trace"
+  local rc=0 err out="$TMP/repair-fail.out"
+  set +e
+  err="$(LAUNCH_REPAIR_TRACE="$trace" LAUNCH_HEAL_RC=1 LAUNCH_SYNC_RC=1 \
+    launch_in_subshell "$rec" work 2>&1 > "$out")"
+  rc=$?
+  set -e
+  assert_eq "0" "$rc" "repair failures must not prevent the Claude exec"
+  assert_eq $'heal\nsync' "$(cat "$trace")" \
+    "heal must run before memory sync"
+  assert_contains "$err" "launching anyway"
+  assert_contains "$err" "memory"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "$CLAUDE_MULTI_ROOT/work" \
+    "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" \
+    "the stub must still run after both repair failures"
 }
 
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an
