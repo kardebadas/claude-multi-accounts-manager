@@ -245,6 +245,70 @@ test_credentials_references_are_limited_to_three_allowed_forms() {
   done < <(grep -F 'credentials.json' "$LIB_ACCOUNTS" || true)
 }
 
+test_add_account_creates_links_stub_and_syncs_memory() {
+  fake_root >/dev/null
+  mkdir -p "$CLAUDE_MULTI_ROOT/shared/project-memory/project-one"
+  local out
+  out="$(add_account personal 2>/dev/null)"
+  assert_eq "" "$out" "add_account writes nothing to stdout"
+
+  local acct="$CLAUDE_MULTI_ROOT/personal"
+  assert_eq "700" "$(stat -c '%a' "$acct")" "the account directory is mode 700"
+  assert_link "$acct/CLAUDE.md"      "../shared/CLAUDE.md"
+  assert_link "$acct/agents"         "../shared/agents"
+  assert_link "$acct/hooks"          "../shared/hooks"
+  assert_link "$acct/commands"       "../shared/commands"
+  assert_link "$acct/agent-memory"   "../shared/agent-memory"
+  assert_link "$acct/settings.json"  "../shared/settings.json"
+  assert_eq "yes" "$(yesno test -L "$acct/skills")" "skills must be a symlink"
+  assert_eq "yes" "$(yesno test -d "$acct/skills")" "the skills link must resolve to a directory"
+  assert_link "$acct/projects/project-one/memory" \
+              "../../../shared/project-memory/project-one"
+
+  assert_eq '{"hasCompletedOnboarding":true,"projects":{}}' \
+            "$(cat "$acct/.claude.json")" \
+            ".claude.json stub is exactly the A31 payload"
+  assert_eq "600" "$(stat -c '%a' "$acct/.claude.json")" "stub is mode 600"
+  assert_eq "no" "$(yesno test -e "$acct/.credentials.json")" "add must not fabricate credentials"
+  assert_eq "no-credentials" "$(account_status personal)" "a new account is not logged in"
+  assert_contains "$(list_accounts)" "personal"
+}
+
+test_add_account_lowercases_with_a_notice_on_stderr() {
+  fake_root >/dev/null
+  local err
+  err="$(add_account Work-A 2>&1 >/dev/null)"
+  assert_contains "$err" "work-a"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/work-a")" "uppercase input must create the lowercase account"
+  assert_eq "no" "$(yesno test -e "$CLAUDE_MULTI_ROOT/Work-A")" "the uppercase directory must not exist"
+}
+
+test_add_account_warns_but_completes_when_a_shared_link_cannot_be_healed() {
+  fake_root >/dev/null
+  rm -rf "$CLAUDE_MULTI_ROOT/shared/agents"
+
+  local err rc=0
+  err="$(add_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "an unrepairable shared link must not abort account creation"
+  assert_contains "$err" "some shared links"
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/personal/.claude.json")" \
+            "the onboarding stub must still be written"
+}
+
+test_add_account_warns_but_completes_when_memory_sync_returns_one() {
+  fake_root >/dev/null
+  sync_project_memory() {
+    return 1
+  }
+
+  local err rc=0
+  err="$(add_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a refused memory sync must not abort account creation"
+  assert_contains "$err" "project-memory sync"
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/personal/.claude.json")" \
+            "the onboarding stub must remain available"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
