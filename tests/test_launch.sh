@@ -645,6 +645,46 @@ test_wrapper_launch_stdout_is_byte_empty_before_claude_output() {
     "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" "the complete wrapper must launch work"
 }
 
+test_complete_wrapper_preserves_claude_exit_statuses() {
+  mk_root
+  mk_account work
+  local code rec rc
+  for code in 0 1 2 42 126 127 130 143 255; do
+    rec="$TMP/wrapper-exit-$code"
+    export FAKE_CLAUDE_EXIT="$code"
+    rc=0
+    set +e
+    entrypoint_in_subshell "$rec" work -p x >/dev/null 2> "$rec.err"
+    rc=$?
+    set -e
+    assert_eq "$code" "$rc" "the wrapper must preserve Claude status $code"
+    assert_eq "no" "$(if [[ -e "$rec.rejected" ]]; then printf yes; else printf no; fi)" \
+      "status $code must be accepted by the fixture"
+    assert_eq "2" "$(rec_argc "$rec")" "status $code must come from the invoked stub"
+    assert_eq "-p" "$(rec_arg "$rec" 0)"
+    assert_eq "x" "$(rec_arg "$rec" 1)"
+  done
+  unset FAKE_CLAUDE_EXIT
+}
+
+test_complete_wrapper_refuses_relative_root_before_launch() {
+  local rec="$TMP/wrapper-relative-root" out="$TMP/wrapper-relative-root.out"
+  local rc=0 err
+  export CLAUDE_MULTI_ROOT="relative/root"
+  set +e
+  entrypoint_in_subshell "$rec" work > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "1" "$rc" "a relative managed root must still be refused"
+  assert_contains "$err" "absolute" "the root refusal must explain the guard"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "root refusal must leave stdout byte-empty"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
+    "root refusal must happen before Claude"
+}
+
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an
 # early-failing test whose later assertion would pass if errexit were masked.
 test_runner_dispatch_reports_an_early_failing_assertion() {
