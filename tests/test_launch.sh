@@ -442,6 +442,64 @@ test_launch_warns_but_continues_when_both_repairs_fail() {
     "the stub must still run after both repair failures"
 }
 
+test_argv_passthrough_is_byte_faithful() {
+  mk_root
+  mk_account work
+  # A leaked, unquoted glob would expand to both of these files in launch's CWD.
+  mkdir -p "$TMP/globdir"
+  : > "$TMP/globdir/decoy-a.txt"
+  : > "$TMP/globdir/decoy-b.txt"
+
+  local rec="$TMP/argv-fidelity" rc=0
+  set +e
+  (
+    cd "$TMP/globdir"
+    launch_in_subshell "$rec" work \
+      --resume \
+      -p 'two words' \
+      "quoted 'single' and \"double\"" \
+      '*.txt' \
+      '' \
+      'trailing space ' \
+      'semi;colon|pipe&amp' \
+      '$HOME/not-expanded' \
+      '--' \
+      -
+  ) >/dev/null 2> "$TMP/argv-fidelity.err"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "the launch must reach the recording stub"
+  assert_eq "11" "$(rec_argc "$rec")" "all eleven arguments must arrive"
+  assert_eq "--resume" "$(rec_arg "$rec" 0)" "argv[0] leading dashes"
+  assert_eq "-p" "$(rec_arg "$rec" 1)" "argv[1] short flag"
+  assert_eq "two words" "$(rec_arg "$rec" 2)" "argv[2] one argument with a space"
+  assert_eq "quoted 'single' and \"double\"" "$(rec_arg "$rec" 3)" \
+    "argv[3] quote characters"
+  assert_eq '*.txt' "$(rec_arg "$rec" 4)" "argv[4] unexpanded glob"
+  assert_eq "" "$(rec_arg "$rec" 5)" "argv[5] empty argument"
+  assert_eq "trailing space " "$(rec_arg "$rec" 6)" "argv[6] trailing space"
+  assert_eq 'semi;colon|pipe&amp' "$(rec_arg "$rec" 7)" "argv[7] shell metacharacters"
+  assert_eq '$HOME/not-expanded' "$(rec_arg "$rec" 8)" "argv[8] literal dollar expansion"
+  assert_eq "--" "$(rec_arg "$rec" 9)" "argv[9] bare double dash"
+  assert_eq "-" "$(rec_arg "$rec" 10)" "argv[10] bare dash"
+}
+
+test_launch_with_zero_claude_arguments_records_an_empty_sidecar() {
+  mk_root
+  mk_account personal
+  local rec="$TMP/argv-empty" rc=0
+  set +e
+  launch_in_subshell "$rec" personal >/dev/null 2> "$TMP/argv-empty.err"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "the zero-argument launch must reach the stub"
+  assert_eq "0" "$(rec_argc "$rec")" "no Claude arguments means no argv elements"
+  assert_eq "$CLAUDE_MULTI_ROOT/personal" \
+    "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" "the intended account must still launch"
+}
+
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an
 # early-failing test whose later assertion would pass if errexit were masked.
 test_runner_dispatch_reports_an_early_failing_assertion() {
