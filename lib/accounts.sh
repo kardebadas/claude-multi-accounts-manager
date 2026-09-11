@@ -329,3 +329,68 @@ verify_archive() {
   fi
   return 0
 }
+
+# prune_trash — A36.3. Keep the newest regular archives by deterministic
+# byte-wise filename order. Only literal top-level .tgz regular files under the
+# resolved trash directory are candidates; symlinks, directories and unrelated
+# entries are never counted or removed.
+prune_trash() {
+  local keep trash f idx total retained=0
+  local LC_ALL=C
+  local -a archives=()
+
+  if (( $# > 1 )); then
+    log "invalid trash retention: expected at most one positive decimal integer"
+    return 1
+  fi
+  if (( $# == 1 )); then
+    keep="$1"
+  else
+    keep="${CLAUDE_MULTI_TRASH_KEEP:-3}"
+  fi
+  if [[ ! "$keep" =~ ^[1-9][0-9]*$ ]]; then
+    log "invalid trash retention '$keep': expected a positive decimal integer"
+    return 1
+  fi
+
+  trash="$(trash_dir)"
+  if [[ ! -d "$trash" ]]; then
+    return 0
+  fi
+  for f in "$trash"/*.tgz; do
+    if [[ -f "$f" && ! -L "$f" ]]; then
+      archives+=("$f")
+    fi
+  done
+
+  total="${#archives[@]}"
+  # A canonical keep value with more digits than the real candidate count is
+  # necessarily larger. Return before arithmetic expansion so even an
+  # arbitrarily large valid policy cannot overflow or be reinterpreted.
+  if (( ${#keep} > ${#total} )); then
+    return 0
+  fi
+  if (( keep >= total )); then
+    return 0
+  fi
+
+  for (( idx=total - 1; idx >= 0; idx-- )); do
+    f="${archives[$idx]}"
+    if (( retained < keep )); then
+      retained=$(( retained + 1 ))
+      continue
+    fi
+    case "$f" in
+      "$trash"/*.tgz) ;;
+      *)
+        log "refusing to prune path outside $trash: $f"
+        return 1
+        ;;
+    esac
+    if ! rm -f -- "$f"; then
+      log "could not prune old backup: ${f##*/}"
+      return 1
+    fi
+    log "pruned old backup: ${f##*/}"
+  done
+}

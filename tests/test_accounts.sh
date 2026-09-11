@@ -832,6 +832,126 @@ test_verify_archive_rejects_an_implausibly_empty_archive() {
   assert_contains "$err" "too few entries"
 }
 
+test_prune_trash_keeps_newest_regular_archives_and_unrelated_entries() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash"
+  mkdir -p "$trash/nested" "$trash/0000-directory.tgz"
+  local n
+  for n in 20260101T000000Z 20260202T000000Z 20260303T000000Z \
+           20260404T000000Z 20260505T000000Z; do
+    printf 'archive\n' > "$trash/personal-$n.tgz"
+  done
+  printf 'keep me\n' > "$trash/notes.txt"
+  printf 'nested archive\n' > "$trash/nested/work-20200101T000000Z.tgz"
+  printf 'outside\n' > "$CLAUDE_MULTI_ROOT/outside"
+  ln -s ../outside "$trash/0000-link.tgz"
+
+  local err out
+  err="$(prune_trash 3 2>&1 >/dev/null)"
+  out="$(prune_trash 3 2>/dev/null)"
+  assert_eq "" "$out" "prune_trash writes nothing to stdout"
+  assert_contains "$err" "20260101T000000Z"
+  assert_contains "$err" "20260202T000000Z"
+
+  assert_eq "yes" "$(yesno test -f "$trash/personal-20260505T000000Z.tgz")" \
+            "the newest archive must be kept"
+  assert_eq "yes" "$(yesno test -f "$trash/personal-20260404T000000Z.tgz")" \
+            "the second-newest archive must be kept"
+  assert_eq "yes" "$(yesno test -f "$trash/personal-20260303T000000Z.tgz")" \
+            "the third-newest archive must be kept"
+  assert_eq "no" "$(yesno test -e "$trash/personal-20260202T000000Z.tgz")" \
+            "the fourth-newest archive must be pruned"
+  assert_eq "no" "$(yesno test -e "$trash/personal-20260101T000000Z.tgz")" \
+            "the oldest archive must be pruned"
+  assert_eq "yes" "$(yesno test -f "$trash/notes.txt")" \
+            "an unrelated file must be preserved"
+  assert_eq "yes" "$(yesno test -f "$trash/nested/work-20200101T000000Z.tgz")" \
+            "nested archives are outside the literal top-level glob"
+  assert_eq "yes" "$(yesno test -d "$trash/0000-directory.tgz")" \
+            "a directory ending in .tgz is not a regular archive entry"
+  assert_eq "yes" "$(yesno test -L "$trash/0000-link.tgz")" \
+            "a symlink ending in .tgz must never be pruned"
+  assert_eq "outside" "$(cat "$CLAUDE_MULTI_ROOT/outside")" \
+            "pruning must not alter a symlink target"
+}
+
+test_prune_trash_succeeds_when_absent_or_short() {
+  fake_root >/dev/null
+  local rc=0 out
+  out="$(prune_trash 3 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "an absent .trash is not an error"
+  assert_eq "" "$out" "the absent-trash case writes nothing to stdout"
+
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash"
+  printf 'a\n' > "$CLAUDE_MULTI_ROOT/.trash/personal-20260101T000000Z.tgz"
+  rc=0
+  prune_trash 3 >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "fewer archives than the keep count is not an error"
+  assert_eq "yes" \
+            "$(yesno test -f "$CLAUDE_MULTI_ROOT/.trash/personal-20260101T000000Z.tgz")" \
+            "nothing may be pruned below the keep count"
+}
+
+test_prune_trash_uses_default_three_and_honors_env_override() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash" n
+  mkdir -p "$trash"
+  for n in 20260101T000000Z 20260202T000000Z 20260303T000000Z \
+           20260404T000000Z; do
+    printf 'archive\n' > "$trash/personal-$n.tgz"
+  done
+
+  prune_trash >/dev/null 2>&1
+  assert_eq "no" "$(yesno test -e "$trash/personal-20260101T000000Z.tgz")" \
+            "the default policy must retain exactly the newest three"
+  assert_eq "yes" "$(yesno test -f "$trash/personal-20260202T000000Z.tgz")" \
+            "the oldest of the default three must survive"
+
+  CLAUDE_MULTI_TRASH_KEEP=1 prune_trash >/dev/null 2>&1
+  assert_eq "yes" "$(yesno test -f "$trash/personal-20260404T000000Z.tgz")" \
+            "the newest archive survives keep=1"
+  assert_eq "no" "$(yesno test -e "$trash/personal-20260303T000000Z.tgz")" \
+            "the environment keep=1 policy prunes the rest"
+}
+
+test_prune_trash_rejects_malformed_or_zero_retention_without_removing() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash" n bad rc err
+  mkdir -p "$trash"
+  for n in 20260101T000000Z 20260202T000000Z; do
+    printf 'archive\n' > "$trash/work-$n.tgz"
+  done
+
+  for bad in '' 0 -1 +1 01 08 1.5 1x ' 1' '1 ' '1+1'; do
+    rc=0
+    err="$(prune_trash "$bad" 2>&1 >/dev/null)" || rc=$?
+    assert_eq "1" "$rc" "retention '$bad' must fail closed"
+    assert_contains "$err" "positive decimal integer"
+    assert_eq "yes" "$(yesno test -f "$trash/work-20260101T000000Z.tgz")" \
+              "invalid retention must not prune the oldest archive"
+    assert_eq "yes" "$(yesno test -f "$trash/work-20260202T000000Z.tgz")" \
+              "invalid retention must not prune the newest archive"
+  done
+
+  rc=0
+  CLAUDE_MULTI_TRASH_KEEP=garbage prune_trash >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a malformed environment policy must fail closed"
+  assert_eq "yes" "$(yesno test -f "$trash/work-20260101T000000Z.tgz")" \
+            "a malformed environment policy must remove nothing"
+}
+
+test_prune_trash_handles_a_huge_canonical_keep_without_arithmetic_overflow() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash" rc=0
+  mkdir -p "$trash"
+  printf 'archive\n' > "$trash/work-20260101T000000Z.tgz"
+
+  prune_trash 999999999999999999999999999999999999 >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "a huge canonical keep count safely means keep everything"
+  assert_eq "yes" "$(yesno test -f "$trash/work-20260101T000000Z.tgz")" \
+            "a huge keep count must not trigger arithmetic pruning"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
