@@ -219,6 +219,21 @@ launch_in_subshell() {
   )
 }
 
+# entrypoint_in_subshell <record-prefix> [claude-multi-args...]
+# Unlike launch_in_subshell, this crosses main and dispatch_args. The identity
+# guard runs after the final PATH assignment and immediately before exec.
+entrypoint_in_subshell() {
+  local rec="$1"
+  shift
+  (
+    set -euo pipefail
+    export PATH="$(stub_bin_dir):$PATH"
+    export FAKE_CLAUDE_LOG="$rec"
+    require_fake_claude_wiring "$REPO_ROOT/tests/fake-claude"
+    exec "$REPO_ROOT/bin/claude-multi" "$@"
+  )
+}
+
 test_fixture_guard_refuses_real_home_and_root() {
   local rc=0 err
   set +e
@@ -498,6 +513,115 @@ test_launch_with_zero_claude_arguments_records_an_empty_sidecar() {
   assert_eq "0" "$(rec_argc "$rec")" "no Claude arguments means no argv elements"
   assert_eq "$CLAUDE_MULTI_ROOT/personal" \
     "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" "the intended account must still launch"
+}
+
+test_dispatch_treats_verb_words_as_account_names() {
+  mk_root
+  local word rec
+  for word in add delete sync doctor list menu help version; do
+    mk_account "$word"
+  done
+
+  for word in add delete sync doctor list menu help version; do
+    rec="$TMP/dispatch-word-$word"
+    entrypoint_in_subshell "$rec" "$word" --resume >/dev/null 2> "$rec.err"
+    assert_eq "$CLAUDE_MULTI_ROOT/$word" \
+      "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)" \
+      "'$word' must remain an account name"
+    assert_eq "1" "$(rec_argc "$rec")" "'$word' must forward one Claude argument"
+    assert_eq "--resume" "$(rec_arg "$rec" 0)" "'$word' must forward its argument"
+  done
+}
+
+test_dispatch_forwards_following_argv_unchanged_and_keeps_stdout_empty() {
+  mk_root
+  mk_account work
+  local rec="$TMP/dispatch-argv" out="$TMP/dispatch-argv.out" rc=0
+  set +e
+  entrypoint_in_subshell "$rec" WORK \
+    -p 'two words' '*.txt' '' '--' - > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+
+  assert_eq "0" "$rc" "dispatch must reach the recording stub"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "normal dispatch must leave stdout byte-empty"
+  assert_contains "$(cat "$rec.err")" "using 'work'" \
+    "uppercase account canonicalization must remain on stderr"
+  assert_eq "6" "$(rec_argc "$rec")" "dispatch must preserve argument count and order"
+  assert_eq "-p" "$(rec_arg "$rec" 0)"
+  assert_eq "two words" "$(rec_arg "$rec" 1)"
+  assert_eq '*.txt' "$(rec_arg "$rec" 2)"
+  assert_eq "" "$(rec_arg "$rec" 3)"
+  assert_eq "--" "$(rec_arg "$rec" 4)"
+  assert_eq "-" "$(rec_arg "$rec" 5)"
+}
+
+test_dispatch_rejects_absent_reserved_and_unrecognized_flag_names() {
+  mk_root
+  local input slug rec rc out err
+  for input in doctor shared --bogus; do
+    slug="${input//[^a-zA-Z0-9]/_}"
+    rec="$TMP/dispatch-refuse-$slug"
+    rc=0
+    set +e
+    out="$(entrypoint_in_subshell "$rec" "$input" 2> "$rec.err")"
+    rc=$?
+    set -e
+    err="$(cat "$rec.err")"
+    assert_eq "1" "$rc" "'$input' must be refused as an account, not handled as a verb"
+    assert_eq "" "$out" "'$input' refusal must leave stdout empty"
+    assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
+      "'$input' must not reach Claude"
+    assert_contains "$err" "${input#--}" "'$input' refusal must identify the input"
+  done
+}
+
+test_dispatch_handles_only_help_and_version_flags_before_root_state() {
+  local flag slug rec rc out err
+  export CLAUDE_MULTI_ROOT="$TMP/root-does-not-exist"
+  for flag in --help -h --version; do
+    slug="${flag//[^a-zA-Z0-9]/_}"
+    rec="$TMP/dispatch-flag-$slug"
+    rc=0
+    set +e
+    out="$(entrypoint_in_subshell "$rec" "$flag" 2> "$rec.err")"
+    rc=$?
+    set -e
+    err="$(cat "$rec.err")"
+    assert_eq "0" "$rc" "$flag must succeed before root or account resolution"
+    assert_eq "" "$out" "$flag must write no stdout"
+    assert_eq "yes" "$(if [[ -s "$rec.err" ]]; then printf yes; else printf no; fi)" \
+      "$flag must emit wrapper UI on stderr"
+    assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
+      "$flag must not dispatch Claude"
+  done
+}
+
+test_dispatch_version_names_the_program_and_version() {
+  local rec="$TMP/dispatch-version" err
+  err="$(entrypoint_in_subshell "$rec" --version 2>&1 >/dev/null)"
+  assert_contains "$err" "claude-multi" "version output must name the program"
+  assert_contains "$err" "0.1.0" "version output must include the current version"
+}
+
+test_dispatch_with_no_arguments_enters_the_menu() {
+  mk_root
+  mk_account personal
+  local rec="$TMP/dispatch-menu" out="$TMP/dispatch-menu.out" err rc=0
+  set +e
+  entrypoint_in_subshell "$rec" </dev/null > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "0" "$rc" "EOF at a bare invocation must leave the menu cleanly"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the menu path must leave stdout byte-empty"
+  assert_contains "$err" "Claude accounts" "bare invocation must render the menu"
+  assert_contains "$err" "personal" "the menu must list the account"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
+    "EOF at the menu must not launch Claude"
 }
 
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an

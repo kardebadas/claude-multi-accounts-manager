@@ -39,6 +39,8 @@ source "$CLAUDE_MULTI_LIB/memory.sh"
 source "$CLAUDE_MULTI_LIB/accounts.sh"
 # shellcheck source=../lib/launch.sh
 source "$CLAUDE_MULTI_LIB/launch.sh"
+# shellcheck source=../lib/menu.sh
+source "$CLAUDE_MULTI_LIB/menu.sh"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -58,31 +60,29 @@ USAGE
 
 # dispatch_args [args…]
 dispatch_args() {
-  if (($# == 0)); then
-    # Phase 6 replaces this with menu_loop.
-    log "menu is not implemented yet"
-    return 0
+  if (( $# > 0 )); then
+    case "$1" in
+      --help | -h)
+        usage
+        return 0
+        ;;
+      --version)
+        printf '%s %s\n' "$CLAUDE_MULTI_PROG" "$CLAUDE_MULTI_VERSION" >&2
+        return 0
+        ;;
+    esac
   fi
 
-  case "$1" in
-    --help | -h)
-      usage
-      return 0
-      ;;
-    --version)
-      printf '%s %s\n' "$CLAUDE_MULTI_PROG" "$CLAUDE_MULTI_VERSION" >&2
-      return 0
-      ;;
-  esac
+  if (( $# == 0 )); then
+    menu_loop
+    return
+  fi
 
   if ! validate_name "$1"; then
     return 1
   fi
   shift
-
-  # Phase 6 replaces this with heal_account + launch_account "$name" "$@".
-  log "launching '$CANONICAL_NAME' is not implemented yet ($# extra args)"
-  return 0
+  launch_account "$CANONICAL_NAME" "$@"
 }
 
 main() {
