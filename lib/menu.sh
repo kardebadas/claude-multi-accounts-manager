@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# lib/menu.sh — account-menu rendering. This task intentionally provides only
-# the frame: selection and action handling are added by later Phase 6 tasks.
+# lib/menu.sh — account-menu rendering and selection. Runtime actions other
+# than account launch and quit are added by later Phase 6 tasks.
 # There are no ANSI escapes or terminal-widget dependencies, so the menu stays
 # readable over SSH and on a bare terminal.
 #
@@ -100,4 +100,50 @@ render_menu() {
     printf '   s) sync   x) doctor    q) quit\n'
     printf '\n  Select %s ' "$G_ARROW"
   } >&2
+}
+
+# menu_trim <string> — return the string without surrounding whitespace.
+menu_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# menu_accounts — fill the caller's names array in list_accounts order.
+menu_accounts() {
+  local line
+  names=()
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+      names+=("$line")
+    fi
+  done < <(list_accounts)
+}
+
+# menu_loop — render and read selections until an account launches or q quits.
+menu_loop() {
+  local -a names=()
+  local selection index
+
+  while :; do
+    menu_accounts
+    render_menu ${names[@]+"${names[@]}"}
+
+    if ! IFS= read -r selection; then
+      return 0
+    fi
+    selection="$(menu_trim "$selection")"
+
+    case "$selection" in
+      q|Q) return 0 ;;
+    esac
+
+    if [[ "$selection" =~ ^[0-9]+$ ]]; then
+      index=$((10#$selection))
+      if (( index >= 1 && index <= ${#names[@]} )); then
+        launch_account "${names[$((index - 1))]}"
+      fi
+    fi
+  done
 }

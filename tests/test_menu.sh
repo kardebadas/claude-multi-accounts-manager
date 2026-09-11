@@ -39,6 +39,32 @@ render_capture() {
   render_menu "$@" >"$stdout_file" 2>"$stderr_file"
 }
 
+# Drive the real menu loop while replacing only launch_account's external exec
+# boundary. The stub records every argument as NUL-delimited data, then exits
+# the pipeline child just as a successful exec would replace it.
+menu_drive() {
+  local input="$1" record="$2" stdout_file="$3" stderr_file="$4" rc
+  set +e
+  (
+    set -euo pipefail
+    launch_account() {
+      printf '%s\0' "$@" > "$record.argv"
+      exit 0
+    }
+    printf '%s' "$input" | menu_loop
+  ) >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+recorded_launch_args() {
+  local record="$1" arg
+  while IFS= read -r -d '' arg; do
+    printf '[%s]\n' "$arg"
+  done < "$record.argv"
+}
+
 spaces_visible() {
   sed 's/ /·/g'
 }
@@ -227,6 +253,62 @@ t_unicode_opt_out_forces_ascii_glyphs_in_a_utf8_locale() {
     "the opt-out uses the ASCII prompt arrow"
   assert_eq "" "$(grep -E '[●○─▸]' "$err" || true)" \
     "the opt-out emits no Unicode menu glyphs"
+}
+
+t_menu_number_delegates_the_same_stably_displayed_account() {
+  make_menu_fixture
+  mk_menu_account zeta credentials
+  mk_menu_account alpha credentials
+  mk_menu_account middle credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/selected"
+  local out="$MENU_BASE/selected.out" err="$MENU_BASE/selected.err" rc
+  rc="$(menu_drive $'2\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "a successful delegated launch ends the menu cleanly"
+  assert_contains "$(sed -n '4p' "$err")" " 1) alpha" \
+    "the first displayed account follows list_accounts byte order"
+  assert_contains "$(sed -n '5p' "$err")" " 2) middle" \
+    "the selected display row follows the same stable account list"
+  assert_contains "$(sed -n '6p' "$err")" " 3) zeta" \
+    "the last displayed account follows the same stable account list"
+  assert_eq "[middle]" "$(recorded_launch_args "$record")" \
+    "selection two delegates exactly the second displayed account"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "selection and delegation leave stdout byte-empty"
+}
+
+t_menu_number_tolerates_surrounding_whitespace() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/whitespace"
+  local out="$MENU_BASE/whitespace.out" err="$MENU_BASE/whitespace.err"
+  local rc
+  rc="$(menu_drive $'  1  \n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "a padded valid selection launches successfully"
+  assert_eq "[personal]" "$(recorded_launch_args "$record")" \
+    "surrounding whitespace does not change the selected account"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "a padded selection leaves stdout byte-empty"
+}
+
+t_menu_q_quits_without_launching_or_writing_stdout() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/quit"
+  local out="$MENU_BASE/quit.out" err="$MENU_BASE/quit.err" rc
+  rc="$(menu_drive $'q\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "q exits the menu cleanly"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "quit never delegates to launch_account"
+  assert_contains "$(cat "$err")" "Select >" \
+    "quit occurs only after the stderr menu prompt is displayed"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "quit leaves stdout byte-empty"
 }
 
 run_all_menu_tests() {
