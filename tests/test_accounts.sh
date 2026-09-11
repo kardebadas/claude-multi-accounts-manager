@@ -429,6 +429,31 @@ test_describe_account_refuses_a_missing_account() {
   assert_eq "" "$out" "a missing-account refusal writes nothing to stdout"
 }
 
+test_confirm_exact_name_requires_the_exact_name() {
+  fake_root >/dev/null
+  local err rc=0
+
+  err="$(printf 'personal\n' | confirm_exact_name personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "the exact name confirms"
+  assert_contains "$err" "type the account name 'personal' to confirm deletion"
+
+  local bad
+  for bad in y Y yes YES '' PERSONAL Personal pErSoNaL personal2 \
+             ' personal' 'personal ' persona; do
+    rc=0
+    printf '%s\n' "$bad" | confirm_exact_name personal >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "input '$bad' must NOT confirm deletion of 'personal'"
+  done
+
+  rc=0
+  confirm_exact_name personal </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "EOF must not confirm"
+
+  local out
+  out="$(printf 'personal\n' | confirm_exact_name personal 2>/dev/null)"
+  assert_eq "" "$out" "the confirmation prompt must not touch stdout"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
