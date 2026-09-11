@@ -31,3 +31,15 @@ list_accounts() {
     printf '%s\n' "$base"
   done | LC_ALL=C sort
 }
+
+# account_status — the credential dot. A20: existence test ONLY. This file is
+# never read, parsed, copied or deleted, here or anywhere else.
+account_status() {
+  local name="$1" acct
+  acct="$(multi_root)/$name"
+  if [[ -s "$acct/.credentials.json" ]]; then
+    printf 'logged-in\n'
+  else
+    printf 'no-credentials\n'
+  fi
+}
