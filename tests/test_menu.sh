@@ -5,6 +5,8 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/tests/assert.sh"
 . "$REPO_ROOT/lib/util.sh"
 . "$REPO_ROOT/lib/config.sh"
+. "$REPO_ROOT/lib/links.sh"
+. "$REPO_ROOT/lib/memory.sh"
 . "$REPO_ROOT/lib/accounts.sh"
 . "$REPO_ROOT/lib/menu.sh"
 
@@ -14,6 +16,7 @@ make_menu_fixture() {
   MENU_BASE="$(mktemp -d "${TMPDIR:-/tmp}/cm-menu.XXXXXX")"
   export HOME="$MENU_BASE/home"
   export CLAUDE_MULTI_ROOT="$HOME/.claude-multi"
+  export CLAUDE_MULTI_PROC="$MENU_BASE/proc"
   unset CLAUDE_MULTI_NO_UNICODE
   case "$CLAUDE_MULTI_ROOT" in
     ""|"/"|"$REAL_HOME"|"$REAL_HOME/.claude-multi"|"$REAL_HOME/.claude")
@@ -21,7 +24,19 @@ make_menu_fixture() {
       exit 99
       ;;
   esac
-  mkdir -p -- "$HOME" "$CLAUDE_MULTI_ROOT"
+  mkdir -p -- "$HOME" \
+    "$CLAUDE_MULTI_ROOT/shared/agents" \
+    "$CLAUDE_MULTI_ROOT/shared/hooks" \
+    "$CLAUDE_MULTI_ROOT/shared/commands" \
+    "$CLAUDE_MULTI_ROOT/shared/agent-memory" \
+    "$CLAUDE_MULTI_ROOT/shared/project-memory" \
+    "$CLAUDE_MULTI_ROOT/shared/plugin-cache" \
+    "$MENU_BASE/codex-skills" \
+    "$CLAUDE_MULTI_PROC/self"
+  printf '%s\n' '# fixture shared rules' > "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  printf '%s\n' '{}' > "$CLAUDE_MULTI_ROOT/shared/settings.json"
+  : > "$CLAUDE_MULTI_PROC/self/environ"
+  ln -s "$MENU_BASE/codex-skills" "$CLAUDE_MULTI_ROOT/shared/skills"
   trap 'rm -rf -- "$MENU_BASE"' EXIT
 }
 
@@ -416,6 +431,153 @@ t_menu_zero_accounts_rejects_number_without_array_underflow() {
     "an empty list cannot accidentally delegate a launch"
   assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
     "empty-list rejection and quit leave stdout byte-empty"
+}
+
+t_menu_add_prompts_and_delegates_to_real_account_creation() {
+  make_menu_fixture
+  export LC_ALL=C
+  local record="$MENU_BASE/add"
+  local out="$MENU_BASE/add.out" err="$MENU_BASE/add.err" rc
+  rc="$(menu_drive $'a\nnewbox\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "the add action returns to the menu for quit"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/newbox" ]]; then printf yes; else printf no; fi)" \
+    "add creates the requested account through add_account"
+  assert_link "$CLAUDE_MULTI_ROOT/newbox/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_contains "$(cat "$err")" "New account name >" \
+    "the add action prompts for the account name on stderr"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "adding an account never triggers an accidental launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the add workflow leaves stdout byte-empty"
+}
+
+t_menu_add_rejects_reserved_name_without_touching_shared() {
+  make_menu_fixture
+  export LC_ALL=C
+  printf 'shared sentinel\n' > "$CLAUDE_MULTI_ROOT/shared/agents/sentinel"
+  local record="$MENU_BASE/add-reserved"
+  local out="$MENU_BASE/add-reserved.out" err="$MENU_BASE/add-reserved.err" rc
+  rc="$(menu_drive $'a\nshared\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "a rejected add returns to the menu for quit"
+  assert_eq "shared sentinel" "$(cat "$CLAUDE_MULTI_ROOT/shared/agents/sentinel")" \
+    "the reserved shared tree remains unchanged"
+  assert_eq "" "$(list_accounts)" \
+    "the reserved name never becomes an account"
+  assert_contains "$(cat "$err")" "reserved" \
+    "the owning account validator reports the rejection on stderr"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "a rejected add never triggers a launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the rejected add leaves stdout byte-empty"
+}
+
+t_menu_add_empty_name_cancels_without_creating_an_account() {
+  make_menu_fixture
+  export LC_ALL=C
+  local record="$MENU_BASE/add-empty"
+  local out="$MENU_BASE/add-empty.out" err="$MENU_BASE/add-empty.err" rc
+  rc="$(menu_drive $'a\n\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "an empty add returns to the menu for quit"
+  assert_eq "" "$(list_accounts)" "an empty name creates no account"
+  assert_contains "$(cat "$err")" "cancelled" \
+    "an empty add is narrated as a cancellation on stderr"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "cancelling add never triggers a launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the cancelled add leaves stdout byte-empty"
+}
+
+t_menu_delete_picks_a_stable_row_then_preserves_the_exact_name_guard() {
+  make_menu_fixture
+  export LC_ALL=C
+  add_account keepme >/dev/null 2>&1
+  add_account dropme >/dev/null 2>&1
+  local record="$MENU_BASE/delete"
+  local out="$MENU_BASE/delete.out" err="$MENU_BASE/delete.err" rc
+  rc="$(menu_drive $'d\n1\ndropme\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "guarded deletion returns to the menu for quit"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT/dropme" ]]; then printf yes; else printf no; fi)" \
+    "the confirmed first stable row is deleted"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/keepme" ]]; then printf yes; else printf no; fi)" \
+    "the other account remains untouched"
+  assert_contains "$(cat "$err")" "Delete which number? >" \
+    "delete first prompts for the stable display number"
+  assert_contains "$(cat "$err")" "type the account name 'dropme' to confirm deletion" \
+    "delete_account retains ownership of its exact-name confirmation"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "deletion never triggers an accidental launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the delete workflow leaves stdout byte-empty"
+}
+
+t_menu_delete_invalid_number_refuses_without_deleting() {
+  make_menu_fixture
+  export LC_ALL=C
+  mk_menu_account keepme credentials
+  local record="$MENU_BASE/delete-invalid"
+  local out="$MENU_BASE/delete-invalid.out" err="$MENU_BASE/delete-invalid.err" rc
+  rc="$(menu_drive $'d\n7\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "an invalid delete choice returns to the menu"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/keepme" ]]; then printf yes; else printf no; fi)" \
+    "an out-of-range delete selection removes nothing"
+  assert_contains "$(cat "$err")" "Delete which number? >" \
+    "the delete action owns a distinct numbered-account prompt"
+  assert_contains "$(cat "$err")" "invalid selection: '7'" \
+    "the invalid delete number is reported on stderr"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "an invalid delete selection never launches"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "invalid delete handling leaves stdout byte-empty"
+}
+
+t_menu_sync_and_doctor_process_every_stable_account() {
+  make_menu_fixture
+  export LC_ALL=C
+  mk_menu_account two
+  mk_menu_account one credentials
+  local record="$MENU_BASE/sync-doctor"
+  local out="$MENU_BASE/sync-doctor.out" err="$MENU_BASE/sync-doctor.err" rc
+  rc="$(menu_drive $'s\nx\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "sync and doctor both return to the menu"
+  assert_contains "$(cat "$err")" "sync: one" \
+    "sync processes the first stable account"
+  assert_contains "$(cat "$err")" "sync: two" \
+    "sync processes the second stable account"
+  assert_contains "$(cat "$err")" "claude-multi: one" \
+    "doctor reports the first stable account"
+  assert_contains "$(cat "$err")" "claude-multi: two" \
+    "doctor reports the second stable account"
+  assert_link "$CLAUDE_MULTI_ROOT/one/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_link "$CLAUDE_MULTI_ROOT/two/CLAUDE.md" "../shared/CLAUDE.md"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "sync and doctor never trigger a launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "sync and doctor leave stdout byte-empty"
+}
+
+t_menu_doctor_is_report_only_and_returns_after_failure() {
+  make_menu_fixture
+  export LC_ALL=C
+  mk_menu_account broken credentials
+  local record="$MENU_BASE/doctor-report"
+  local out="$MENU_BASE/doctor-report.out" err="$MENU_BASE/doctor-report.err" rc
+  rc="$(menu_drive $'x\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "a failing doctor report returns to the menu for quit"
+  assert_contains "$(cat "$err")" "missing" \
+    "doctor reports the broken account state"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT/broken/CLAUDE.md" || -L "$CLAUDE_MULTI_ROOT/broken/CLAUDE.md" ]]; then printf yes; else printf no; fi)" \
+    "doctor does not repair a missing shared link"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
+    "doctor never triggers a launch"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "doctor diagnostics leave stdout byte-empty"
 }
 
 run_all_menu_tests() {

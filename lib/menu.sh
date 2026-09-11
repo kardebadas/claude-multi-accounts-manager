@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# lib/menu.sh — account-menu rendering and selection. Runtime actions other
-# than account launch and quit are added by later Phase 6 tasks.
+# lib/menu.sh — account-menu rendering, selection, and action dispatch.
 # There are no ANSI escapes or terminal-widget dependencies, so the menu stays
 # readable over SSH and on a bare terminal.
 #
@@ -139,6 +138,10 @@ menu_loop() {
     case "$selection" in
       '') continue ;;
       q|Q) return 0 ;;
+      a|A) menu_do_add; continue ;;
+      d|D) menu_do_delete ${names[@]+"${names[@]}"}; continue ;;
+      s|S) menu_do_sync ${names[@]+"${names[@]}"}; continue ;;
+      x|X) menu_do_doctor ${names[@]+"${names[@]}"}; continue ;;
     esac
 
     if [[ "$selection" =~ ^[0-9]+$ ]]; then
@@ -150,4 +153,87 @@ menu_loop() {
 
     warn "invalid selection: '$selection'"
   done
+}
+
+# menu_pick <prompt> [account ...] — return a selected account name on stdout.
+menu_pick() {
+  local prompt="$1" selection index
+  shift
+  local -a names=("$@")
+
+  if (( ${#names[@]} == 0 )); then
+    warn "no accounts to choose from"
+    return 1
+  fi
+
+  printf '  %s ' "$prompt" >&2
+  if ! IFS= read -r selection; then
+    printf '\n' >&2
+    return 1
+  fi
+  selection="$(menu_trim "$selection")"
+
+  if [[ "$selection" =~ ^[0-9]+$ ]]; then
+    index=$((10#$selection))
+    if (( index >= 1 && index <= ${#names[@]} )); then
+      printf '%s' "${names[$((index - 1))]}"
+      return 0
+    fi
+  fi
+
+  warn "invalid selection: '$selection'"
+  return 1
+}
+
+# The action wrappers are the menu's only calls into mutating account APIs.
+# They always return so menu_loop can redraw; all diagnostics remain on stderr.
+menu_do_add() {
+  local name
+  printf '  New account name %s ' "$G_ARROW" >&2
+  if ! IFS= read -r name; then
+    printf '\n' >&2
+    return 0
+  fi
+  name="$(menu_trim "$name")"
+  if [[ -z "$name" ]]; then
+    warn "cancelled"
+    return 0
+  fi
+  add_account "$name" || warn "add failed"
+  return 0
+}
+
+menu_do_delete() {
+  local name
+  if ! name="$(menu_pick "Delete which number? $G_ARROW" "$@")"; then
+    return 0
+  fi
+  delete_account "$name" || warn "delete failed"
+  return 0
+}
+
+menu_do_sync() {
+  local name
+  if (( $# == 0 )); then
+    warn "no accounts to sync"
+    return 0
+  fi
+  for name in "$@"; do
+    warn "sync: $name"
+    heal_account "$name" || warn "sync: $name: link repair failed"
+    sync_project_memory "$name" || warn "sync: $name: memory sync failed"
+  done
+  return 0
+}
+
+menu_do_doctor() {
+  local name
+  if (( $# == 0 )); then
+    warn "no accounts to check"
+    return 0
+  fi
+  for name in "$@"; do
+    doctor_report "$name" || warn "doctor: $name: report failed"
+  done
+  return 0
 }
