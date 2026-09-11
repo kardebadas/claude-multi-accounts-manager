@@ -239,7 +239,7 @@ store_slugs() {
 # Zero bytes on stdout; missing accounts are refused without exiting the caller.
 sync_project_memory() {
   local account="${1:?sync_project_memory: account required}"
-  local account_path slug link target linked=0
+  local account_path slug link target link_status linked=0
   account_path="$(account_dir "$account")"
   if [[ ! -d "$account_path" ]]; then
     warn "sync_project_memory: no such account: $account"
@@ -254,6 +254,12 @@ sync_project_memory() {
     target="$(memory_link_target "$slug")"
     if _memory_link_sync_one "$link" "$target" "$account/$slug"; then
       linked=$((linked + 1))
+    else
+      link_status=$?
+      if (( link_status != 1 )); then
+        warn "sync_project_memory: refused unsafe relink for $account/$slug"
+        return 1
+      fi
     fi
   done < <(store_slugs)
 
@@ -264,21 +270,78 @@ sync_project_memory() {
 }
 
 # _memory_link_sync_one <link> <target> <label>
-# 0 = created or repaired (and narrated), 1 = already correct (silent).
-# Task 9 adds lossless handling for real content and dangling-link repair.
+# 0 = created or repaired (and narrated), 1 = already correct (silent),
+# 2 = refused because a safe, lossless repair could not be established.
+# Zero bytes on stdout in every branch.
 _memory_link_sync_one() {
   local link="$1" target="$2" label="$3"
-  mkdir -p "$(dirname "$link")"
+  local parent target_path old_target replacement backup
+  parent="$(dirname "$link")"
+  if ! mkdir -p "$parent"; then
+    warn "project-memory: unable to prepare link directory for $label"
+    return 2
+  fi
+  target_path="$parent/$target"
+  if [[ ! -d "$target_path" ]]; then
+    warn "project-memory: store target is not an existing directory for $label"
+    return 2
+  fi
+
   if [[ -L "$link" ]]; then
-    if [[ "$(readlink "$link")" == "$target" ]]; then
+    old_target="$(readlink "$link")"
+    if [[ "$old_target" == "$target" && -d "$link" ]]; then
       return 1
     fi
-    rm -f "$link"
-    ln -s "$target" "$link"
+    replacement="$link.relink-$$"
+    while [[ -e "$replacement" || -L "$replacement" ]]; do
+      replacement="$replacement.1"
+    done
+    if ! ln -s "$target" "$replacement"; then
+      warn "project-memory: unable to prepare replacement link for $label"
+      return 2
+    fi
+    if ! mv -fT "$replacement" "$link"; then
+      rm -f "$replacement"
+      warn "project-memory: unable to repoint $label; previous link retained"
+      return 2
+    fi
     warn "project-memory: repointed $label"
     return 0
   fi
-  ln -s "$target" "$link"
+
+  if [[ -e "$link" ]]; then
+    backup="$link.backup-$(date -u +%Y%m%dT%H%M%SZ)"
+    while :; do
+      while [[ -e "$backup" || -L "$backup" ]]; do
+        backup="$backup.1"
+      done
+      if ! mv -nT "$link" "$backup"; then
+        warn "project-memory: unable to back up existing $label; refusing relink"
+        return 2
+      fi
+      if [[ ! -e "$link" && ! -L "$link" ]]; then
+        break
+      fi
+      backup="$backup.1"
+    done
+
+    if ! ln -s "$target" "$link"; then
+      if mv -T "$backup" "$link"; then
+        warn "project-memory: relink failed for $label; restored existing content"
+      else
+        warn "project-memory: relink failed for $label; content preserved at ${backup##*/}"
+      fi
+      return 2
+    fi
+    warn "project-memory: backed up existing $label to ${backup##*/}"
+    log "project-memory: linked $label"
+    return 0
+  fi
+
+  if ! ln -s "$target" "$link"; then
+    warn "project-memory: unable to link $label"
+    return 2
+  fi
   log "project-memory: linked $label"
   return 0
 }
