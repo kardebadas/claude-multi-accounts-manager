@@ -205,3 +205,41 @@ account_in_use() {
   log "  refusing to delete rather than guessing"
   return 2
 }
+
+# check_headroom — A36.4. Require about 2x the account size free on the
+# filesystem that holds .trash: transcripts compress poorly, and .trash sits on
+# the same filesystem as the account, so the write competes with live sessions.
+# df is called by bare name so tests can substitute a shell function.
+check_headroom() {
+  local name="${1:?check_headroom needs an account name}"
+  local root trash need avail want
+  root="$(multi_root)"
+  trash="$root/.trash"
+  mkdir -p "$trash"
+
+  if need="$(du -sk -- "$root/$name" 2>/dev/null | awk 'NR==1{print $1}')"; then
+    :
+  else
+    need=""
+  fi
+  if [[ ! "$need" =~ ^[0-9]+$ ]]; then
+    log "refusing to delete '$name': cannot measure account size under $root"
+    return 1
+  fi
+  want=$(( need * 2 ))
+
+  if avail="$(df -Pk -- "$trash" 2>/dev/null | awk 'NR==2{print $4}')"; then
+    :
+  else
+    avail=""
+  fi
+  if [[ ! "$avail" =~ ^[0-9]+$ ]]; then
+    log "refusing to delete '$name': cannot measure free space under $trash"
+    return 1
+  fi
+  if (( avail < want )); then
+    log "refusing to delete '$name': the backup wants ${want}K (2x the ${need}K account) under $trash, only ${avail}K free"
+    return 1
+  fi
+  return 0
+}

@@ -582,6 +582,41 @@ test_account_in_use_never_reads_credentials_or_prints_environments() {
   assert_contains "$body" 'grep -qxF'
 }
 
+test_check_headroom_passes_with_room_and_refuses_without() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+
+  local rc=0 out
+  out="$(check_headroom personal 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a temp filesystem with room must pass"
+  assert_eq "" "$out" "the headroom check writes nothing to stdout"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/.trash")" \
+            "the headroom check creates the trash directory on its filesystem"
+
+  # Deterministic refusal: a df stub reporting 1 free block.
+  df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/fake 100 99 1 99%% /fake\n'; }
+  local err
+  rc=0
+  err="$(check_headroom personal 2>&1 >/dev/null)" || rc=$?
+  unset -f df
+  assert_eq "1" "$rc" "1K free must refuse"
+  assert_contains "$err" "free"
+  assert_contains "$err" "2x"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "a refused headroom check must change nothing"
+}
+
+test_check_headroom_refuses_when_df_says_nothing() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  df() { return 1; }
+  local rc=0 err
+  err="$(check_headroom personal 2>&1 >/dev/null)" || rc=$?
+  unset -f df
+  assert_eq "1" "$rc" "an unusable df must refuse, not pass"
+  assert_contains "$err" "cannot measure free space"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
