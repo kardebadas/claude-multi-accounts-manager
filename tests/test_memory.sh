@@ -663,6 +663,176 @@ t_sync_is_a_noop_when_the_store_is_empty() {
   cleanup_memory_fixture
 }
 
+t_sync_second_run_changes_nothing_and_says_nothing() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  sync_project_memory personal 2>/dev/null
+
+  local snap1 snap2 err
+  snap1="$(cd "$FIX_ROOT/personal" && find . -printf '%p %y %l\n' | sort | cksum)"
+  err="$(sync_project_memory personal 2>&1 >/dev/null)"
+  assert_stdout_empty_bytes sync_project_memory personal
+  snap2="$(cd "$FIX_ROOT/personal" && find . -printf '%p %y %l\n' | sort | cksum)"
+
+  assert_eq "$snap1" "$snap2" "a repeat sync must not change the tree"
+  assert_eq "" "$err" "a repeat sync must report nothing on stderr"
+  cleanup_memory_fixture
+}
+
+t_sync_repoints_a_wrong_target() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  local slug link err
+  slug="${FIX_REAL_SLUGS[0]}"
+  link="$(memory_link_path personal "$slug")"
+  mkdir -p "$(dirname "$link")"
+  ln -s "../../../shared/project-memory/WRONG" "$link"
+
+  err="$(sync_project_memory personal 2>&1 >/dev/null)"
+  assert_link "$link" "$(memory_link_target "$slug")"
+  assert_contains "$err" "repointed" "the repair must be narrated on stderr"
+  cleanup_memory_fixture
+}
+
+t_sync_repairs_a_dangling_wrong_link_for_an_enumerated_slug() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  local slug link
+  slug="${FIX_REAL_SLUGS[1]}"
+  link="$(memory_link_path personal "$slug")"
+  mkdir -p "$(dirname "$link")"
+  ln -s "../../../shared/project-memory/does-not-exist" "$link"
+
+  assert_eq "yes" "$(yesno test -d "$(project_memory_store)/$slug")" \
+    "the repaired slug must be an existing enumerated store directory"
+  sync_project_memory personal 2>/dev/null
+  assert_eq "yes" "$(yesno test -d "$link")" \
+    "a dangling wrong link must be repaired until it resolves"
+  assert_link "$link" "$(memory_link_target "$slug")"
+  cleanup_memory_fixture
+}
+
+t_sync_leaves_an_unenumerated_dangling_link_untouched() {
+  make_memory_fixture
+  mkdir -p "$FIX_ROOT/personal/projects/orphan-slug"
+  local link="$FIX_ROOT/personal/projects/orphan-slug/memory"
+  local target="../../../shared/project-memory/orphan-slug"
+  ln -s "$target" "$link"
+
+  sync_project_memory personal 2>/dev/null
+  assert_link "$link" "$target"
+  assert_eq "no" "$(yesno test -e "$FIX_ROOT/shared/project-memory/orphan-slug")" \
+    "sync must not invent a store directory for an unenumerated link"
+  cleanup_memory_fixture
+}
+
+t_sync_backs_up_a_real_directory_uniquely_before_relinking() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  local slug link err backup out="$FIX_BASE/sync.out"
+  slug="${FIX_REAL_SLUGS[2]}"
+  link="$(memory_link_path personal "$slug")"
+  mkdir -p "$link"
+  printf 'local notes that must survive\n' > "$link/LOCAL.md"
+
+  backup="$link.backup-20260911T010203Z"
+  mkdir -p "$backup"
+  printf 'existing backup\n' > "$backup/SENTINEL"
+  date() { printf '20260911T010203Z\n'; }
+  sync_project_memory personal >"$out" 2>"$FIX_BASE/sync.err"
+  err="$(cat "$FIX_BASE/sync.err")"
+
+  assert_link "$link" "$(memory_link_target "$slug")"
+  assert_eq "0" "$(wc -c < "$out" | tr -d ' ')" \
+    "a backup-and-relink repair writes zero bytes to stdout"
+  assert_contains "$err" "backed up" "the backup must be narrated"
+  assert_eq "existing backup" "$(cat "$backup/SENTINEL")" \
+    "an existing backup name must never be overwritten"
+  assert_eq "local notes that must survive" "$(cat "$backup.1/LOCAL.md")" \
+    "the pre-existing directory content must survive in a unique backup"
+  cleanup_memory_fixture
+}
+
+t_sync_backs_up_a_real_file_before_relinking() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  local slug link err backup found=""
+  slug="${FIX_REAL_SLUGS[3]}"
+  link="$(memory_link_path personal "$slug")"
+  mkdir -p "$(dirname "$link")"
+  printf 'not a directory\n' > "$link"
+
+  err="$(sync_project_memory personal 2>&1 >/dev/null)"
+  assert_link "$link" "$(memory_link_target "$slug")"
+  for backup in "$link".backup-*; do
+    if [[ -f $backup ]]; then
+      found="$backup"
+    fi
+  done
+  assert_eq "no" "$(yesno test -z "$found")" "a backup file must exist"
+  assert_eq "not a directory" "$(cat "$found")" "file content preserved"
+  assert_contains "$err" "backed up" "the backup must be narrated"
+  cleanup_memory_fixture
+}
+
+t_sync_refuses_and_restores_content_when_relink_fails() {
+  make_memory_fixture
+  mkdir -p "$FIX_ROOT/personal"
+  local slug="safe-relink-slug" link rc=0 err out="$FIX_BASE/sync.out"
+  mkdir -p "$(project_memory_store)/$slug"
+  link="$(memory_link_path personal "$slug")"
+  mkdir -p "$link"
+  printf 'must remain in place\n' > "$link/LOCAL.md"
+
+  ln() { return 1; }
+  sync_project_memory personal >"$out" 2>"$FIX_BASE/sync.err" || rc=$?
+  unset -f ln
+  err="$(cat "$FIX_BASE/sync.err")"
+
+  assert_eq "1" "$rc" "a failed relink must refuse the sync"
+  assert_eq "0" "$(wc -c < "$out" | tr -d ' ')" \
+    "a refused relink writes zero bytes to stdout"
+  assert_eq "no" "$(yesno test -L "$link")" \
+    "a failed relink must not pretend a link was established"
+  assert_eq "must remain in place" "$(cat "$link/LOCAL.md")" \
+    "content must be restored at its original path when relinking fails"
+  assert_contains "$err" "restored" "the safe refusal must be narrated"
+  cleanup_memory_fixture
+}
+
+t_sync_picks_up_a_slug_added_to_the_store_later() {
+  make_memory_fixture
+  fix_seed_and_account personal
+  sync_project_memory personal 2>/dev/null
+
+  local slug link
+  slug="$(fix_slug projects/beta-app)-later"
+  mkdir -p "$FIX_ROOT/shared/project-memory/$slug"
+  printf 'new project\n' > "$FIX_ROOT/shared/project-memory/$slug/MEMORY.md"
+
+  sync_project_memory personal 2>/dev/null
+  link="$(memory_link_path personal "$slug")"
+  assert_link "$link" "$(memory_link_target "$slug")"
+  assert_eq "new project" "$(cat "$link/MEMORY.md")" "the new link resolves"
+  cleanup_memory_fixture
+}
+
+t_full_seed_then_sync_twice_is_stable() {
+  make_memory_fixture
+  mkdir -p "$FIX_ROOT/personal" "$FIX_ROOT/work"
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  sync_project_memory personal 2>/dev/null
+  sync_project_memory work 2>/dev/null
+
+  local snap1 snap2 err
+  snap1="$(cd "$FIX_ROOT" && find . -printf '%p %y %s %T@ %l\n' | sort | cksum)"
+  err="$( { seed_project_memory "$FIX_MAIN"; sync_project_memory personal; sync_project_memory work; } 2>&1 >/dev/null )"
+  snap2="$(cd "$FIX_ROOT" && find . -printf '%p %y %s %T@ %l\n' | sort | cksum)"
+  assert_eq "$snap1" "$snap2" "the whole seed+multi-account sync cycle is idempotent"
+  assert_eq "" "$err" "the second cycle reports nothing new"
+  cleanup_memory_fixture
+}
+
 # Dispatch MUST remain the last block: later tasks append tests above it.
 run_all_memory_tests() {
   local fn status=0 ran=0
