@@ -131,11 +131,13 @@ menu_loop() {
     render_menu ${names[@]+"${names[@]}"}
 
     if ! IFS= read -r selection; then
+      printf '\n' >&2
       return 0
     fi
     selection="$(menu_trim "$selection")"
 
     case "$selection" in
+      '') continue ;;
       q|Q) return 0 ;;
     esac
 
@@ -145,5 +147,7 @@ menu_loop() {
         launch_account "${names[$((index - 1))]}"
       fi
     fi
+
+    warn "invalid selection: '$selection'"
   done
 }
