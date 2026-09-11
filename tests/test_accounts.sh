@@ -454,6 +454,134 @@ test_confirm_exact_name_requires_the_exact_name() {
   assert_eq "" "$out" "the confirmation prompt must not touch stdout"
 }
 
+test_account_in_use_detects_a_live_process_via_proc() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  add_account work 2>/dev/null
+  if [[ ! -r /proc/self/environ ]]; then
+    printf '  SKIP: /proc/<pid>/environ is not readable here\n' >&2
+    return 0
+  fi
+
+  CLAUDE_CONFIG_DIR="$CLAUDE_MULTI_ROOT/personal" sleep 30 &
+  local pid=$!
+  trap "kill '$pid' 2>/dev/null || true; wait '$pid' 2>/dev/null || true" EXIT
+  local tries=0
+  while [[ ! -r "/proc/$pid/environ" && $tries -lt 50 ]]; do
+    tries=$((tries + 1))
+  done
+
+  local rc=0 err
+  err="$(account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "a live process holding the config dir means in-use"
+  assert_contains "$err" "$pid"
+
+  rc=0
+  account_in_use work >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "an untouched account is not in use"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  trap - EXIT
+
+  rc=0
+  account_in_use personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "after the process exits the account is free"
+}
+
+test_account_in_use_skips_its_own_pid() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local procdir rc=0
+  procdir="$(mktemp -d "${TMPDIR:-/tmp}/cm-proc.XXXXXX")"
+  mkdir -p "$procdir/self" "$procdir/$$"
+  printf 'probe\0' > "$procdir/self/environ"
+  printf 'CLAUDE_CONFIG_DIR=%s\0' "$CLAUDE_MULTI_ROOT/personal" > "$procdir/$$/environ"
+
+  CLAUDE_MULTI_PROC="$procdir" account_in_use personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "the in-use probe must skip its own pid"
+  rm -rf -- "$procdir"
+}
+
+test_account_in_use_reports_undeterminable_without_proc_or_lsof() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+
+  local rc=0 err out
+  err="$(CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF=cm-no-such-tool \
+         account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "no /proc and no lsof must report UNDETERMINABLE, not free"
+  assert_contains "$err" "could not determine"
+
+  rc=0
+  out="$(CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF=cm-no-such-tool \
+         account_in_use personal 2>/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "the no-probe result remains undeterminable"
+  assert_eq "" "$out" "the in-use check writes nothing to stdout"
+  rm -rf -- "$empty"
+}
+
+test_account_in_use_uses_lsof_when_proc_is_missing() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty stub
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  stub="$empty/lsof-stub"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "4242\n"' > "$stub"
+  chmod 700 "$stub"
+
+  local rc=0 err
+  err="$(CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF="$stub" \
+         account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "an lsof hit means in-use"
+  assert_contains "$err" "4242"
+  rm -rf -- "$empty"
+}
+
+test_account_in_use_handles_lsof_no_hit_as_free() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty stub rc=0
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  stub="$empty/lsof-stub"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$stub"
+  chmod 700 "$stub"
+
+  CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF="$stub" \
+    account_in_use personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "lsof status 1 with no hits means definitely free"
+  rm -rf -- "$empty"
+}
+
+test_account_in_use_fails_closed_on_lsof_error() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty stub rc=0 err
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  stub="$empty/lsof-stub"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "probe failed\n" >&2' 'exit 2' > "$stub"
+  chmod 700 "$stub"
+
+  err="$(CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF="$stub" \
+         account_in_use personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "an lsof probe error must be undeterminable"
+  assert_contains "$err" "could not determine"
+  rm -rf -- "$empty"
+}
+
+test_account_in_use_never_reads_credentials_or_prints_environments() {
+  local body
+  body="$(sed -n '/^account_in_use()/,/^}/p' "$LIB_ACCOUNTS")"
+  assert_eq "" "$(printf '%s\n' "$body" | grep -F 'credentials' || true)" \
+            "the in-use check must not reference the credentials file"
+  local leaks
+  leaks="$(printf '%s\n' "$body" | grep -nE '(log|warn|printf)[^#]*environ' || true)"
+  assert_eq "" "$leaks" "process environments must never be printed"
+  assert_contains "$body" 'grep -qxF'
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
