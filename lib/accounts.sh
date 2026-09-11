@@ -43,3 +43,38 @@ account_status() {
     printf 'no-credentials\n'
   fi
 }
+
+# add_account — A12 validation, A31 stub, all shared links, then memory sync.
+# Link creation is delegated to heal_account (the launch/sync repair path, not
+# the report-only doctor path, A35) so the shared-item table has one consumer.
+add_account() {
+  local raw="${1:-}" name acct
+  if ! validate_name "$raw"; then
+    return 1
+  fi
+  # validate_name owns lowercasing and delegates reserved-name rejection to
+  # is_reserved_name, then returns the one canonical spelling through this
+  # stdout-safe variable.
+  name="$CANONICAL_NAME"
+  acct="$(account_dir "$name")"
+  if [[ -e "$acct" || -L "$acct" ]]; then
+    log "account '$name' already exists at $acct"
+    return 1
+  fi
+
+  mkdir -p "$acct"
+  chmod 700 "$acct"
+
+  if ! heal_account "$name"; then
+    warn "some shared links for '$name' could not be created; run sync after fixing shared/"
+  fi
+
+  printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "$acct/.claude.json"
+  chmod 600 "$acct/.claude.json"
+
+  if ! sync_project_memory "$name"; then
+    warn "project-memory sync for '$name' did not complete; run sync from the menu"
+  fi
+
+  log "created account '$name' at $acct"
+}
