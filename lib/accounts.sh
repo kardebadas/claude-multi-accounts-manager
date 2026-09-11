@@ -78,3 +78,25 @@ add_account() {
 
   log "created account '$name' at $acct"
 }
+
+# offer_launch — A17. Returns a decision; the caller (menu) does the exec.
+# rc 0 = the user wants to launch now. CLAUDE_MULTI_NO_LAUNCH=1 suppresses the
+# prompt entirely, which is how the test suite and any non-interactive caller
+# drive the add path.
+offer_launch() {
+  local name="${1:?offer_launch needs an account name}" reply
+  if [[ -n "${CLAUDE_MULTI_NO_LAUNCH:-}" ]]; then
+    log "not launching; run: claude-multi $name"
+    return 1
+  fi
+  printf "launch claude in '%s' now to log in? [Y/n] " "$name" >&2
+  if ! IFS= read -r reply; then
+    printf '\n' >&2
+    log "no answer; not launching. run: claude-multi $name"
+    return 1
+  fi
+  case "$reply" in
+    ''|y|Y|yes|Yes|YES) return 0 ;;
+    *) log "not launching; run: claude-multi $name"; return 1 ;;
+  esac
+}
