@@ -346,6 +346,56 @@ test_add_account_refuses_invalid_names() {
   assert_eq "" "$(list_accounts)" "no invalid name created a directory"
 }
 
+test_offer_launch_prompt_text_and_default_yes() {
+  fake_root >/dev/null
+  unset CLAUDE_MULTI_NO_LAUNCH
+  local err rc=0
+  err="$(printf '\n' | offer_launch personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "empty answer means yes"
+  assert_contains "$err" "launch claude in 'personal' now to log in? [Y/n]"
+
+  local out
+  out="$(printf '\n' | offer_launch personal 2>/dev/null)"
+  assert_eq "" "$out" "the prompt must not touch stdout"
+}
+
+test_offer_launch_declines_on_n_and_on_eof() {
+  fake_root >/dev/null
+  unset CLAUDE_MULTI_NO_LAUNCH
+  local rc
+
+  rc=0; printf 'n\n' | offer_launch personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "'n' declines"
+
+  rc=0; printf 'N\n' | offer_launch personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "'N' declines"
+
+  rc=0; offer_launch personal </dev/null >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "EOF declines rather than hanging or launching"
+
+  rc=0; printf 'y\n' | offer_launch personal >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "'y' accepts"
+}
+
+test_offer_launch_is_fully_suppressible() {
+  fake_root >/dev/null
+  local rc=0 err
+  err="$(CLAUDE_MULTI_NO_LAUNCH=1 offer_launch personal 2>&1 >/dev/null </dev/null)" || rc=$?
+  assert_eq "1" "$rc" "suppressed offer declines"
+  assert_eq "" "$(printf '%s\n' "$err" | grep -F '[Y/n]' || true)" \
+            "CLAUDE_MULTI_NO_LAUNCH must suppress the prompt itself"
+  assert_contains "$err" "claude-multi personal"
+}
+
+test_offer_launch_never_execs_claude() {
+  # The launch offer returns a decision; only Phase 6 execs. Guard that here so
+  # nobody "helpfully" adds an exec to the add path.
+  local hits
+  hits="$(grep -nE '\b(exec|claude)\b' <(sed -n '/^offer_launch()/,/^}/p' "$LIB_ACCOUNTS") \
+          | grep -vE "launch claude in|claude-multi" || true)"
+  assert_eq "" "$hits" "offer_launch must not exec or invoke claude"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
