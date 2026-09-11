@@ -396,6 +396,39 @@ test_offer_launch_never_execs_claude() {
   assert_eq "" "$hits" "offer_launch must not exec or invoke claude"
 }
 
+test_describe_account_shows_path_size_and_credentials() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  head -c 4096 /dev/zero | tr '\0' 'x' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  printf 'not-a-real-token\n' > "$CLAUDE_MULTI_ROOT/personal/.credentials.json"
+
+  local err out
+  err="$(describe_account personal 2>&1 >/dev/null)"
+  out="$(describe_account personal 2>/dev/null)"
+  assert_eq "" "$out" "describe_account writes nothing to stdout"
+  assert_contains "$err" "$CLAUDE_MULTI_ROOT/personal"
+  assert_contains "$err" "size:"
+  assert_contains "$err" "credentials: present"
+  assert_contains "$err" "log in again"
+
+  add_account fresh 2>/dev/null
+  err="$(describe_account fresh 2>&1 >/dev/null)"
+  assert_contains "$err" "credentials: absent"
+}
+
+test_describe_account_refuses_a_missing_account() {
+  fake_root >/dev/null
+  local err out rc=0
+  err="$(describe_account missing 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a missing account must be refused"
+  assert_contains "$err" "no such account"
+
+  rc=0
+  out="$(describe_account missing 2>/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "the missing-account refusal remains non-zero"
+  assert_eq "" "$out" "a missing-account refusal writes nothing to stdout"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #

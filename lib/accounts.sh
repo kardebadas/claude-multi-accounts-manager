@@ -100,3 +100,33 @@ offer_launch() {
     *) log "not launching; run: claude-multi $name"; return 1 ;;
   esac
 }
+
+# describe_account — A13: show what is about to be destroyed before asking.
+# All output is UI on stderr. Credential presence comes from account_status, so
+# this function never names or opens the credentials file itself.
+describe_account() {
+  local name="${1:-}" acct size creds
+  if ! validate_name "$name"; then
+    return 1
+  fi
+  name="$CANONICAL_NAME"
+  acct="$(account_dir "$name")"
+  if [[ ! -d "$acct" ]]; then
+    log "describe_account: no such account: $name"
+    return 1
+  fi
+
+  size="$(du -sh -- "$acct" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [[ -z "$size" ]]; then
+    size="unknown"
+  fi
+  if [[ "$(account_status "$name")" == "logged-in" ]]; then
+    creds="present — NOT included in the backup; you will need to log in again"
+  else
+    creds="absent"
+  fi
+  log "about to delete account '$name'"
+  log "  path:        $acct"
+  log "  size:        $size"
+  log "  credentials: $creds"
+}
