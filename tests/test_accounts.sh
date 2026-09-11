@@ -1063,6 +1063,266 @@ test_purge_account_has_exactly_one_structurally_guarded_recursive_rm() {
             "the only recursive removal must use the literal validated root/name path"
 }
 
+test_delete_account_happy_path_archives_data_then_removes_only_target() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  add_account work 2>/dev/null
+  printf 'not-a-real-token\n' > "$CLAUDE_MULTI_ROOT/personal/.credentials.json"
+  printf 'prompts\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  mkdir -p "$CLAUDE_MULTI_ROOT/personal/projects/slug"
+  printf 'transcript\n' > "$CLAUDE_MULTI_ROOT/personal/projects/slug/a.jsonl"
+
+  local out rc=0
+  out="$(printf 'personal\n' | delete_account personal 2>/dev/null)" || rc=$?
+  assert_eq "0" "$rc" "the fully guarded happy path succeeds"
+  assert_eq "" "$out" "delete_account writes nothing to stdout"
+  assert_eq "no" "$(yesno test -e "$CLAUDE_MULTI_ROOT/personal")" \
+            "the selected account must be gone"
+  assert_eq "work" "$(list_accounts)" "only the target account was deleted"
+  assert_eq "yes" "$(yesno test -f "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+            "shared data must survive account removal"
+
+  local tgz listing
+  tgz="$(find "$CLAUDE_MULTI_ROOT/.trash" -maxdepth 1 -type f \
+               -name 'personal-*.tgz' -print | head -n 1)"
+  assert_eq "yes" "$(yesno test -n "$tgz")" "a verified backup archive must remain"
+  listing="$(tar -tzf "$tgz")"
+  assert_eq "" "$(printf '%s\n' "$listing" | grep -F 'credentials.json' || true)" \
+            "the backup must exclude credentials"
+  assert_eq "" "$(printf '%s\n' "$listing" | grep -F '.claude.json' || true)" \
+            "the backup must exclude the onboarding stub"
+  assert_contains "$listing" "history.jsonl"
+  assert_contains "$listing" "projects/slug/a.jsonl"
+}
+
+test_delete_account_bare_y_refuses_before_archiving_with_zero_stdout() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local rc=0 err
+  err="$(printf 'y\n' | delete_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a bare y must fail the typed-name gate"
+  assert_contains "$err" "does not match"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "a bare y must not delete the account"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '*.tgz' -print 2>/dev/null)" \
+            "a confirmation refusal creates no archive"
+  assert_stdout_empty_bytes feed y delete_account personal
+}
+
+test_delete_account_leaves_data_and_no_artifact_when_tar_fails() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'payload\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+
+  tar() {
+    local arg output="" take_next=0
+    for arg in "$@"; do
+      if (( take_next )); then output="$arg"; break; fi
+      if [[ "$arg" == "-czf" ]]; then take_next=1; fi
+    done
+    if [[ -n "$output" ]]; then printf 'partial\n' > "$output"; fi
+    return 2
+  }
+
+  local rc=0 err
+  err="$(printf 'personal\n' | delete_account personal 2>&1 >/dev/null)" || rc=$?
+  assert_eq "1" "$rc" "a deterministic tar failure fails the delete"
+  assert_contains "$err" "NOT deleted"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "the account must survive a failed archive"
+  assert_eq "payload" "$(cat "$CLAUDE_MULTI_ROOT/personal/history.jsonl")" \
+            "account data must remain intact after tar failure"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" \
+                         \( -name '*.tgz' -o -name '.tmp.*' \) -print 2>/dev/null)" \
+            "a failed archive must leave neither final nor staging artifacts"
+}
+
+test_delete_account_refuses_a_real_in_use_process_before_archiving() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  if [[ ! -r /proc/self/environ ]]; then
+    printf '  SKIP: /proc/<pid>/environ is not readable here\n' >&2
+    return 0
+  fi
+
+  CLAUDE_CONFIG_DIR="$CLAUDE_MULTI_ROOT/personal" sleep 30 &
+  local pid=$! tries=0
+  trap "kill '$pid' 2>/dev/null || true; wait '$pid' 2>/dev/null || true" EXIT
+  while [[ ! -r "/proc/$pid/environ" && $tries -lt 50 ]]; do
+    tries=$(( tries + 1 ))
+  done
+
+  local rc=0 err
+  err="$(printf 'personal\n' | delete_account personal 2>&1 >/dev/null)" || rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  trap - EXIT
+
+  assert_eq "1" "$rc" "a real process using the account must refuse deletion"
+  assert_contains "$err" "in use"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "an in-use account must remain"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '*.tgz' -print 2>/dev/null)" \
+            "in-use refusal must precede archiving"
+}
+
+test_delete_account_distinguishes_stubbed_free_in_use_and_unknown_statuses() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local USE_RC calls="$CLAUDE_MULTI_ROOT/use.calls"
+  account_in_use() {
+    printf '%s\n' "$USE_RC" >> "$calls"
+    return "$USE_RC"
+  }
+
+  local rc status
+  for status in 0 2; do
+    USE_RC="$status"
+    rc=0
+    printf 'personal\n' | delete_account personal >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "account_in_use status $status must refuse deletion"
+    assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+              "status $status must leave the account intact"
+  done
+
+  USE_RC=1
+  rc=0
+  printf 'wrong-name\n' | delete_account personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "free status 1 must continue to the typed-name gate"
+  assert_eq "0
+2
+1" "$(cat "$calls")" \
+            "the composed path must preserve all three status meanings"
+}
+
+test_delete_account_refuses_when_real_use_probe_is_undeterminable() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local empty rc=0 err
+  empty="$(mktemp -d "${TMPDIR:-/tmp}/cm-noproc.XXXXXX")"
+  err="$(printf 'personal\n' \
+         | CLAUDE_MULTI_PROC="$empty" CLAUDE_MULTI_LSOF=cm-no-such-tool \
+           delete_account personal 2>&1 >/dev/null)" || rc=$?
+  rmdir "$empty"
+
+  assert_eq "1" "$rc" "an undeterminable real use probe must refuse"
+  assert_contains "$err" "could not determine"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "an unknown use state must leave the account intact"
+}
+
+test_delete_account_headroom_and_verification_failures_preserve_state() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'payload\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+
+  df() {
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n'
+    printf '/fake 100 99 1 99%% /fake\n'
+  }
+  local rc=0
+  printf 'personal\n' | delete_account personal >/dev/null 2>&1 || rc=$?
+  unset -f df
+  assert_eq "1" "$rc" "insufficient headroom must refuse"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "headroom failure must leave the account"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '*.tgz' -print 2>/dev/null)" \
+            "headroom failure must precede archive creation"
+
+  printf 'older backup\n' > "$CLAUDE_MULTI_ROOT/.trash/preexisting.tgz"
+  verify_archive() {
+    log "backup verification failed: forced"
+    return 1
+  }
+  rc=0
+  printf 'personal\n' | delete_account personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "forced archive verification failure must refuse"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "verification failure must leave the account"
+  assert_eq "older backup" "$(cat "$CLAUDE_MULTI_ROOT/.trash/preexisting.tgz")" \
+            "verification cleanup must preserve older archives"
+  assert_eq "preexisting.tgz" \
+            "$(find "$CLAUDE_MULTI_ROOT/.trash" -maxdepth 1 -type f -name '*.tgz' \
+                    -printf '%f\n' | LC_ALL=C sort)" \
+            "verification cleanup must remove only the newly created archive"
+}
+
+test_delete_account_never_prunes_when_purge_fails() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'payload\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  local marker="$CLAUDE_MULTI_ROOT/prune.called" archive
+  purge_account() { return 1; }
+  prune_trash() { printf 'called\n' > "$marker"; }
+
+  local rc=0
+  printf 'personal\n' | delete_account personal >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "purge failure must fail the composed delete"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "purge failure must leave the account intact"
+  assert_eq "no" "$(yesno test -e "$marker")" \
+            "pruning must occur only after a successful purge"
+  archive="$(find "$CLAUDE_MULTI_ROOT/.trash" -maxdepth 1 -type f \
+                  -name 'personal-*.tgz' -print -quit)"
+  assert_eq "yes" "$(yesno test -n "$archive")" \
+            "a verified archive must be kept when purge fails"
+}
+
+test_delete_account_refuses_nonexistent_reserved_and_symlink_targets() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  local rc n
+
+  rc=0
+  printf 'ghost\n' | delete_account ghost >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a nonexistent account is refused"
+  for n in shared .trash plugin-cache project-memory; do
+    rc=0
+    printf '%s\n' "$n" | delete_account "$n" >/dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "delete_account must refuse reserved name '$n'"
+  done
+  ln -s "$CLAUDE_MULTI_ROOT/personal" "$CLAUDE_MULTI_ROOT/sneaky"
+  rc=0
+  printf 'sneaky\n' | delete_account sneaky >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "a symlinked account target must be refused before archiving"
+  assert_eq "yes" "$(yesno test -d "$CLAUDE_MULTI_ROOT/personal")" \
+            "all early refusals must leave real accounts intact"
+  assert_stdout_empty_bytes feed ghost delete_account ghost
+}
+
+test_delete_account_stage_order_is_structural() {
+  local body line_of
+  body="$(sed -n '/^delete_account()/,/^}/p' "$LIB_ACCOUNTS")"
+  line_of() {
+    printf '%s\n' "$body" | grep -n "$1" | head -n 1 | cut -d: -f1
+  }
+  local valid reserved exists in_use describe confirm headroom archive verify purge prune
+  valid="$(line_of 'validate_name')"
+  reserved="$(line_of 'is_reserved_name')"
+  exists="$(line_of '\[\[.*-d.*\$acct')"
+  in_use="$(line_of 'account_in_use')"
+  describe="$(line_of 'describe_account')"
+  confirm="$(line_of 'confirm_exact_name')"
+  headroom="$(line_of 'check_headroom')"
+  archive="$(line_of 'archive_account')"
+  verify="$(line_of 'verify_archive')"
+  purge="$(line_of 'purge_account')"
+  prune="$(line_of 'prune_trash')"
+  assert_eq "yes" \
+            "$(yesno test -n "$valid$reserved$exists$in_use$describe$confirm$headroom$archive$verify$purge$prune")" \
+            "delete_account must call every required guard and stage"
+  assert_eq "yes" "$(yesno test "$valid" -lt "$reserved")" "validate precedes reserved check"
+  assert_eq "yes" "$(yesno test "$reserved" -lt "$exists")" "reserved check precedes existence"
+  assert_eq "yes" "$(yesno test "$exists" -lt "$in_use")" "existence precedes in-use"
+  assert_eq "yes" "$(yesno test "$in_use" -lt "$describe")" "in-use precedes description"
+  assert_eq "yes" "$(yesno test "$describe" -lt "$confirm")" "description precedes confirmation"
+  assert_eq "yes" "$(yesno test "$confirm" -lt "$headroom")" "confirmation precedes headroom"
+  assert_eq "yes" "$(yesno test "$headroom" -lt "$archive")" "headroom precedes archiving"
+  assert_eq "yes" "$(yesno test "$archive" -lt "$verify")" "archive precedes verification"
+  assert_eq "yes" "$(yesno test "$verify" -lt "$purge")" "verification precedes purge"
+  assert_eq "yes" "$(yesno test "$purge" -lt "$prune")" "purge precedes pruning"
+}
+
 # ── RUNNER ── KEEP THIS BLOCK LAST IN THE FILE ───────────────────────────────
 # Every later task in 5a and 5b appends its test functions ABOVE this marker.
 #
