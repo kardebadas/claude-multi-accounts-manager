@@ -13,9 +13,11 @@ say() { printf 'install.sh: %s\n' "$*" >&2; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 force=0
+mode=install
 for arg in "$@"; do
   case "$arg" in
     --force) force=1 ;;
+    --uninstall) mode=uninstall ;;
     -h|--help)
       say "usage: install.sh [--force] [--uninstall]"
       exit 0
@@ -29,6 +31,23 @@ done
 
 [[ -f "$src" ]] || die "not found: $src — run install.sh from inside its own clone"
 [[ -x "$src" ]] || die "not executable: $src — run: chmod +x bin/claude-multi"
+
+if [[ "$mode" == uninstall ]]; then
+  if [[ ! -L "$target" && ! -e "$target" ]]; then
+    say "nothing to uninstall: $target does not exist"
+    exit 0
+  fi
+  if [[ ! -L "$target" ]]; then
+    die "refusing to remove $target — it is not a symlink, so it is not ours"
+  fi
+  current="$(readlink -- "$target")"
+  if [[ "$current" != "$src" ]]; then
+    die "refusing to remove $target — it points to $current, not $src"
+  fi
+  rm -- "$target"
+  say "removed: $target"
+  exit 0
+fi
 
 if [[ -L "$target" ]]; then
   current="$(readlink -- "$target")"

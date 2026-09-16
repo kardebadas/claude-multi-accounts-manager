@@ -163,6 +163,62 @@ test_install_writes_nothing_outside_local_bin() {
   rm -rf -- "$h"
 }
 
+test_uninstall_removes_our_link() {
+  local h; h="$(new_home)"
+  run_install "$h"
+  assert_eq "0" "$rc" "install exits 0"
+  run_install "$h" --uninstall
+  assert_eq "0" "$rc" "uninstall exits 0"
+  [[ -e "$h/.local/bin/claude-multi" || -L "$h/.local/bin/claude-multi" ]] && \
+    { printf 'uninstall left the link behind\n' >&2; return 1; }
+  assert_contains "$ERR" "removed" "uninstall reports removal on stderr"
+  [[ -d "$h/.local/bin" ]] || { printf 'uninstall removed the bin dir too\n' >&2; return 1; }
+  rm -rf -- "$h"
+}
+
+test_uninstall_is_idempotent() {
+  local h; h="$(new_home)"
+  run_install "$h"
+  run_install "$h" --uninstall
+  assert_eq "0" "$rc" "first uninstall exits 0"
+  run_install "$h" --uninstall
+  assert_eq "0" "$rc" "second uninstall exits 0"
+  assert_contains "$ERR" "nothing to uninstall" "second uninstall says nothing to do"
+  rm -rf -- "$h"
+}
+
+test_uninstall_refuses_foreign_symlink() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$h/other-tool"
+  ln -s -- "$h/other-tool" "$h/.local/bin/claude-multi"
+  run_install "$h" --uninstall
+  assert_eq "1" "$rc" "foreign link is not ours to remove"
+  assert_link "$h/.local/bin/claude-multi" "$h/other-tool" "foreign link survives uninstall"
+  rm -rf -- "$h"
+}
+
+test_uninstall_refuses_regular_file() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf 'not mine\n' > "$h/.local/bin/claude-multi"
+  run_install "$h" --uninstall
+  assert_eq "1" "$rc" "regular file is not ours to remove"
+  assert_eq "not mine" "$(cat "$h/.local/bin/claude-multi")" "regular file survives uninstall"
+  rm -rf -- "$h"
+}
+
+test_uninstall_force_still_refuses_foreign_link() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$h/other-tool"
+  ln -s -- "$h/other-tool" "$h/.local/bin/claude-multi"
+  run_install "$h" --uninstall --force
+  assert_eq "1" "$rc" "--force does not widen uninstall ownership"
+  assert_link "$h/.local/bin/claude-multi" "$h/other-tool" "foreign link survives --uninstall --force"
+  rm -rf -- "$h"
+}
+
 # ── run every test this file defines ────────────────────────────────────────
 # Auto-discovery rather than a hand-maintained list, so a case appended by a
 # later task cannot be silently unregistered. Each case runs in its own
