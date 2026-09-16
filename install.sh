@@ -12,8 +12,10 @@ target="$bin_dir/claude-multi"
 say() { printf 'install.sh: %s\n' "$*" >&2; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+force=0
 for arg in "$@"; do
   case "$arg" in
+    --force) force=1 ;;
     -h|--help)
       say "usage: install.sh [--force] [--uninstall]"
       exit 0
@@ -28,9 +30,20 @@ done
 [[ -f "$src" ]] || die "not found: $src — run install.sh from inside its own clone"
 [[ -x "$src" ]] || die "not executable: $src — run: chmod +x bin/claude-multi"
 
-if [[ -L "$target" ]] && [[ "$(readlink -- "$target")" == "$src" ]]; then
-  say "already installed: $target -> $src"
-  exit 0
+if [[ -L "$target" ]]; then
+  current="$(readlink -- "$target")"
+  if [[ "$current" == "$src" ]]; then
+    say "already installed: $target -> $src"
+    exit 0
+  fi
+  if (( force )); then
+    rm -- "$target"
+    say "replaced foreign link that pointed to: $current"
+  else
+    die "refusing to clobber $target — it is a symlink to $current (re-run with --force to replace it)"
+  fi
+elif [[ -e "$target" ]]; then
+  die "refusing to clobber $target — it exists and is not a symlink (move it aside yourself)"
 fi
 
 mkdir -p -- "$bin_dir"
