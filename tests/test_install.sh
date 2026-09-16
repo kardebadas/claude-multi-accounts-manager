@@ -25,15 +25,18 @@ new_home() {
   printf '%s' "$h"
 }
 
-# run_install HOMEDIR [args...] -> sets rc, OUT (stdout), ERR (stderr)
+# run_install HOMEDIR [args...] -> sets rc, OUT_BYTES (stdout), ERR (stderr)
 run_install() {
   local h="$1"; shift
-  local o e
+  local installer="${INSTALL_SCRIPT:-$repo/install.sh}" o e
   o="$(mktemp)"; e="$(mktemp)"
   rc=0
-  HOME="$h" bash "$repo/install.sh" "$@" >"$o" 2>"$e" || rc=$?
-  OUT="$(cat "$o")"; ERR="$(cat "$e")"
+  HOME="$h" bash "$installer" "$@" >"$o" 2>"$e" || rc=$?
+  OUT_BYTES="$(wc -c < "$o")"
+  OUT_BYTES="${OUT_BYTES//[[:space:]]/}"
+  ERR="$(cat "$e")"
   rm -f -- "$o" "$e"
+  assert_eq "0" "$OUT_BYTES" "installer stdout must be byte-empty"
 }
 
 test_install_creates_link() {
@@ -67,8 +70,19 @@ test_install_is_idempotent() {
 test_install_prints_only_to_stderr() {
   local h; h="$(new_home)"
   run_install "$h"
-  assert_eq "" "$OUT" "install writes nothing to stdout"
+  assert_eq "0" "$OUT_BYTES" "install writes zero bytes to stdout"
   assert_contains "$ERR" "claude-multi" "install reports the result on stderr"
+  rm -rf -- "$h"
+}
+
+test_install_help_prints_only_to_stderr() {
+  local h; h="$(new_home)"
+  run_install "$h" --help
+  assert_eq "0" "$rc" "help exits 0"
+  assert_eq "0" "$OUT_BYTES" "help writes zero bytes to stdout"
+  assert_contains "$ERR" "usage:" "help reports usage on stderr"
+  [[ -e "$h/.local/bin/claude-multi" || -L "$h/.local/bin/claude-multi" ]] && \
+    { printf 'help unexpectedly installed the link\n' >&2; return 1; }
   rm -rf -- "$h"
 }
 
@@ -160,6 +174,27 @@ test_install_writes_nothing_outside_local_bin() {
   assert_eq "$(printf '%s\n./.local\n./.local/bin\n./.local/bin/claude-multi' "$before" | LC_ALL=C sort)" \
             "$after" \
             "install adds exactly .local, .local/bin and the link"
+  rm -rf -- "$h"
+}
+
+test_install_stdout_guard_rejects_newline_mutant() {
+  local h mutant err_file mutant_status=0
+  h="$(new_home)"
+  mutant="$h/mutant-repo"
+  err_file="$(mktemp)"
+  mkdir -p -- "$mutant/bin"
+  cp -- "$repo/install.sh" "$mutant/install.sh"
+  cp -- "$src" "$mutant/bin/claude-multi"
+  sed -i '/^set -euo pipefail$/a printf "\\n"' "$mutant/install.sh"
+
+  set +e
+  ( set -euo pipefail; INSTALL_SCRIPT="$mutant/install.sh" run_install "$h" ) 2>"$err_file"
+  mutant_status=$?
+  set -e
+
+  assert_eq "1" "$mutant_status" "byte-exact stdout guard rejects a newline-only leak"
+  assert_contains "$(cat "$err_file")" "byte-empty" "mutation failure names the stdout contract"
+  rm -f -- "$err_file"
   rm -rf -- "$h"
 }
 
