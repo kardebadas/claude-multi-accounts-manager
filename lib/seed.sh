@@ -263,7 +263,8 @@ seed_shared() (
     warn "seed destination appeared before publication: $publish_target"
     return 1
   fi
-  if ! mv -- "$stage" "$publish_target"; then
+  if ! mv -T --no-clobber -- "$stage" "$publish_target" || \
+     [[ -e "$stage" || -L "$stage" || ! -d "$publish_target" || -L "$publish_target" ]]; then
     warn "failed to publish staged seed root: $publish_target"
     return 1
   fi

@@ -354,6 +354,29 @@ make_signalling_awk_stub() {
   chmod +x "$path"
 }
 
+# Create a competing directory only when seed_shared reaches its final rename.
+# Earlier settings-file renames continue through the real mv unchanged.
+install_seed_mv_collision_gate() {
+  local gate="$1" real_mv
+  real_mv=$(command -v mv)
+  mkdir -p "$gate"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'REAL_MV=%q\n' "$real_mv"
+    cat <<'GATE'
+args=("$@")
+argc=${#args[@]}
+target_path="${args[$((argc - 1))]}"
+if [[ "$target_path" == "$SEED_COLLISION_TARGET" ]]; then
+  mkdir -- "$target_path"
+  cp -p -- "$SEED_COLLISION_FIXTURE" "$target_path/sentinel"
+fi
+exec "$REAL_MV" "$@"
+GATE
+  } > "$gate/mv"
+  chmod 700 "$gate/mv"
+}
+
 test_seed_leaves_main_and_resolved_skills_source_unchanged() {
   local tmp main shared source_before source_after skills_before skills_after
   new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
@@ -538,6 +561,40 @@ test_seed_keeps_target_invisible_until_complete_atomic_publish() {
   assert_eq "file" "$(kind "$shared/hooks/post-commit-practices.sh")" "published tree contains hook target"
   assert_eq "0" "$(find "$parent" -maxdepth 1 -name "$stage_pattern" | wc -l | tr -d ' ')" \
     "successful publication leaves no sibling staging directory"
+  rm -rf "$tmp"
+}
+
+test_seed_publication_collision_preserves_destination_and_fails() {
+  local tmp main root parent base shared gate fixture before after err rc
+  new_sandbox; tmp="$SANDBOX_TMP"; main=$(make_fixture_main "$tmp")
+  root=$(multi_root); parent=$(dirname -- "$root"); base=${root##*/}
+  shared="$root/shared"; gate="$tmp/mv-collision"; fixture="$tmp/competitor-bytes"
+  printf 'competing destination\n\000binary tail\n' > "$fixture"
+  before=$(md5sum < "$fixture")
+  install_seed_mv_collision_gate "$gate"
+
+  set +e
+  err=$(
+    PATH="$gate:$PATH" \
+      SEED_COLLISION_TARGET="$root" \
+      SEED_COLLISION_FIXTURE="$fixture" \
+      seed_shared "$main" "$shared" 2>&1 >/dev/null
+  )
+  rc=$?
+  set -e
+
+  after=$(md5sum < "$root/sentinel")
+  assert_eq "no" "$([[ $rc -eq 0 ]] && printf yes || printf no)" \
+    "a destination appearing at publication must fail direct seeding"
+  assert_eq "$before" "$after" \
+    "the competing destination must remain byte-for-byte unchanged"
+  assert_eq "sentinel" \
+    "$(find "$root" -mindepth 1 -maxdepth 1 -printf '%f\n')" \
+    "publication must not nest the staged tree inside the competing destination"
+  assert_eq "" \
+    "$(find "$parent" -maxdepth 2 -name ".$base.seed.*" -print)" \
+    "a publication collision must remove all seed staging residue"
+  assert_contains "$err" "publish" "the failed publication must be reported"
   rm -rf "$tmp"
 }
 
