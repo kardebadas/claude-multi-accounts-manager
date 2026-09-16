@@ -629,6 +629,36 @@ t_menu_sync_and_doctor_process_every_stable_account() {
     "sync and doctor leave stdout byte-empty"
 }
 
+t_menu_sync_ignores_symlinked_account_and_preserves_external_target() {
+  make_menu_fixture
+  export LC_ALL=C
+  local external="$MENU_BASE/external-account"
+  mkdir -p "$external/projects/private"
+  printf 'external settings bytes\n' > "$external/settings.json"
+  printf 'external project bytes\n' > "$external/projects/private/history.jsonl"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/escape"
+  local record="$MENU_BASE/sync-external"
+  local out="$MENU_BASE/sync-external.out" err="$MENU_BASE/sync-external.err" rc
+
+  rc="$(menu_drive $'s\nq\n' "$record" "$out" "$err")"
+  menu_do_sync escape >>"$out" 2>>"$err"
+
+  assert_eq "0" "$rc" "sync returns to the menu after ignoring unsafe entries"
+  assert_eq "external settings bytes" "$(cat "$external/settings.json")" \
+            "menu sync leaves an external settings file byte-for-byte unchanged"
+  assert_eq "external project bytes" \
+            "$(cat "$external/projects/private/history.jsonl")" \
+            "menu sync leaves external project data byte-for-byte unchanged"
+  assert_eq "" "$(find "$external" \( -name '*.bak.*' -o -type l \) -print)" \
+            "menu sync creates no backup or shared link in the external target"
+  assert_eq "" "$(list_accounts)" \
+            "a symlinked directory is not exposed as an account"
+  assert_contains "$(cat "$err")" "unsafe account target refused" \
+    "the mutating sync entry point independently validates canonical containment"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+            "the guarded sync path remains stdout-clean"
+}
+
 t_menu_doctor_is_report_only_and_returns_after_failure() {
   make_menu_fixture
   export LC_ALL=C
