@@ -81,6 +81,88 @@ test_install_rejects_unknown_option() {
   rm -rf -- "$h"
 }
 
+test_install_refuses_non_symlink() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf 'i am somebody elses script\n' > "$h/.local/bin/claude-multi"
+  run_install "$h"
+  assert_eq "1" "$rc" "non-symlink at target refuses with exit 1"
+  assert_contains "$ERR" "not a symlink" "refusal explains it is not a symlink"
+  assert_eq "i am somebody elses script" "$(cat "$h/.local/bin/claude-multi")" \
+    "the existing regular file is left byte-identical"
+  rm -rf -- "$h"
+}
+
+test_install_refuses_non_symlink_even_with_force() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf 'precious\n' > "$h/.local/bin/claude-multi"
+  run_install "$h" --force
+  assert_eq "1" "$rc" "--force does not override a regular file"
+  assert_eq "precious" "$(cat "$h/.local/bin/claude-multi")" "regular file survives --force"
+  rm -rf -- "$h"
+}
+
+test_install_refuses_foreign_symlink_without_force() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$h/other-tool"
+  ln -s -- "$h/other-tool" "$h/.local/bin/claude-multi"
+  run_install "$h"
+  assert_eq "1" "$rc" "foreign symlink refuses with exit 1"
+  assert_contains "$ERR" "--force" "refusal names the --force escape hatch"
+  assert_link "$h/.local/bin/claude-multi" "$h/other-tool" "foreign link is untouched"
+  rm -rf -- "$h"
+}
+
+test_install_force_replaces_foreign_symlink() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$h/other-tool"
+  ln -s -- "$h/other-tool" "$h/.local/bin/claude-multi"
+  run_install "$h" --force
+  assert_eq "0" "$rc" "--force exits 0"
+  assert_link "$h/.local/bin/claude-multi" "$src" "--force repoints the link at our bin"
+  rm -rf -- "$h"
+}
+
+test_install_replaces_dangling_symlink_only_with_force() {
+  local h; h="$(new_home)"
+  mkdir -p -- "$h/.local/bin"
+  ln -s -- "$h/gone-forever" "$h/.local/bin/claude-multi"
+  run_install "$h"
+  assert_eq "1" "$rc" "dangling foreign link refuses without --force"
+  run_install "$h" --force
+  assert_eq "0" "$rc" "dangling foreign link yields to --force"
+  assert_link "$h/.local/bin/claude-multi" "$src" "link now points at our bin"
+  rm -rf -- "$h"
+}
+
+test_install_never_edits_a_profile() {
+  local h; h="$(new_home)"
+  local before after
+  before="$(cd -- "$h" && cksum .bashrc .profile .bash_profile .zshrc)"
+  run_install "$h"
+  assert_eq "0" "$rc" "install exits 0"
+  after="$(cd -- "$h" && cksum .bashrc .profile .bash_profile .zshrc)"
+  assert_eq "$before" "$after" "no profile file is modified by install"
+  [[ -e "$h/.zprofile" || -e "$h/.bash_login" ]] && \
+    { printf 'install created a profile file\n' >&2; return 1; }
+  rm -rf -- "$h"
+}
+
+test_install_writes_nothing_outside_local_bin() {
+  local h; h="$(new_home)"
+  local before after
+  before="$(cd -- "$h" && find . -mindepth 1 | LC_ALL=C sort)"
+  run_install "$h"
+  after="$(cd -- "$h" && find . -mindepth 1 | LC_ALL=C sort)"
+  assert_eq "$(printf '%s\n./.local\n./.local/bin\n./.local/bin/claude-multi' "$before" | LC_ALL=C sort)" \
+            "$after" \
+            "install adds exactly .local, .local/bin and the link"
+  rm -rf -- "$h"
+}
+
 # ── run every test this file defines ────────────────────────────────────────
 # Auto-discovery rather than a hand-maintained list, so a case appended by a
 # later task cannot be silently unregistered. Each case runs in its own
