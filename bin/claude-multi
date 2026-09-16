@@ -73,6 +73,12 @@ dispatch_args() {
     esac
   fi
 
+  if [[ ! -d "$(multi_root)" ]]; then
+    first_run_wizard || return 1
+    menu_loop
+    return
+  fi
+
   if (( $# == 0 )); then
     menu_loop
     return
