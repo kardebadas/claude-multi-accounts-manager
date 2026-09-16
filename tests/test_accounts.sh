@@ -150,6 +150,21 @@ test_list_accounts_skips_reserved_and_hidden_entries() {
   assert_eq "$expected" "$out" "only real accounts are listed, sorted"
 }
 
+test_list_accounts_rejects_symlinked_and_invalid_account_entries() {
+  fake_root >/dev/null
+  local external
+  external="$HOME/../external-account"
+  mkdir -p "$external"
+  mk_account valid-account
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/linked-account"
+  mkdir -p "$CLAUDE_MULTI_ROOT/Uppercase" \
+           "$CLAUDE_MULTI_ROOT/invalid_name" \
+           "$CLAUDE_MULTI_ROOT/$(printf 'x%.0s' {1..33})"
+
+  assert_eq "valid-account" "$(list_accounts)" \
+            "only real directories with exact canonical account names are enumerated"
+}
+
 test_list_accounts_order_is_deterministic_and_locale_independent() {
   # Phase 6 numbers the menu by this order and deletes by the typed number, so
   # the order is part of the delete path's safety. Accounts are created in a
@@ -875,6 +890,36 @@ test_prune_trash_keeps_newest_regular_archives_and_unrelated_entries() {
             "pruning must not alter a symlink target"
 }
 
+test_prune_trash_orders_mixed_accounts_by_archive_timestamp() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash"
+  mkdir -p "$trash"
+  printf 'newest\n' > "$trash/alpha-20990101T000000Z.tgz"
+  printf 'oldest\n' > "$trash/zulu-20200101T000000Z.tgz"
+
+  prune_trash 1 >/dev/null 2>&1
+
+  assert_eq "yes" "$(yesno test -f "$trash/alpha-20990101T000000Z.tgz")" \
+            "retention keeps the chronologically newest archive across accounts"
+  assert_eq "no" "$(yesno test -e "$trash/zulu-20200101T000000Z.tgz")" \
+            "retention prunes the chronologically oldest archive across accounts"
+}
+
+test_prune_trash_breaks_equal_timestamp_ties_by_complete_filename() {
+  fake_root >/dev/null
+  local trash="$CLAUDE_MULTI_ROOT/.trash"
+  mkdir -p "$trash"
+  printf 'alpha\n' > "$trash/alpha-20990101T000000Z.tgz"
+  printf 'zulu\n' > "$trash/zulu-20990101T000000Z.tgz"
+
+  prune_trash 1 >/dev/null 2>&1
+
+  assert_eq "no" "$(yesno test -e "$trash/alpha-20990101T000000Z.tgz")" \
+            "the byte-wise lower complete filename loses an equal-timestamp tie"
+  assert_eq "yes" "$(yesno test -f "$trash/zulu-20990101T000000Z.tgz")" \
+            "the byte-wise higher complete filename deterministically wins the tie"
+}
+
 test_prune_trash_succeeds_when_absent_or_short() {
   fake_root >/dev/null
   local rc=0 out
@@ -1266,6 +1311,54 @@ test_delete_account_never_prunes_when_purge_fails() {
                   -name 'personal-*.tgz' -print -quit)"
   assert_eq "yes" "$(yesno test -n "$archive")" \
             "a verified archive must be kept when purge fails"
+}
+
+test_delete_account_reports_success_when_post_purge_pruning_fails() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'payload\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  prune_trash() {
+    warn "forced cleanup failure"
+    return 1
+  }
+
+  local rc=0 err archive
+  err="$(printf 'personal\n' | delete_account personal 2>&1 >/dev/null)" || rc=$?
+  archive="$(find "$CLAUDE_MULTI_ROOT/.trash" -maxdepth 1 -type f \
+                  -name 'personal-*.tgz' -print -quit)"
+
+  assert_eq "0" "$rc" \
+            "post-purge cleanup failure must not report the completed deletion as failed"
+  assert_eq "no" "$(yesno test -e "$CLAUDE_MULTI_ROOT/personal")" \
+            "the successful purge remains truthfully reflected in filesystem state"
+  assert_eq "yes" "$(yesno test -n "$archive")" \
+            "the verified recovery archive remains after cleanup failure"
+  assert_contains "$err" "deleted 'personal'" \
+    "the completed destructive action is reported as successful"
+  assert_contains "$err" "cleanup" \
+    "the optional retention failure is reported as a cleanup warning"
+}
+
+test_archive_collision_preserves_existing_archive_and_live_account() {
+  fake_root >/dev/null
+  add_account personal 2>/dev/null
+  printf 'live payload\n' > "$CLAUDE_MULTI_ROOT/personal/history.jsonl"
+  mkdir -p "$CLAUDE_MULTI_ROOT/.trash"
+  local final="$CLAUDE_MULTI_ROOT/.trash/personal-20990101T000000Z.tgz"
+  printf 'existing recovery artifact\n' > "$final"
+  date() { printf '20990101T000000Z\n'; }
+
+  local rc=0 err
+  err="$(printf 'personal\n' | delete_account personal 2>&1 >/dev/null)" || rc=$?
+
+  assert_eq "1" "$rc" "an archive publication collision must fail closed"
+  assert_eq "existing recovery artifact" "$(cat "$final")" \
+            "the prior recovery archive must never be overwritten"
+  assert_eq "live payload" "$(cat "$CLAUDE_MULTI_ROOT/personal/history.jsonl")" \
+            "the live account must survive an archive collision"
+  assert_eq "" "$(find "$CLAUDE_MULTI_ROOT/.trash" -name '.tmp.*' -print)" \
+            "a collision failure cleans only its private staging archive"
+  assert_contains "$err" "NOT deleted"
 }
 
 test_delete_account_refuses_nonexistent_reserved_and_symlink_targets() {

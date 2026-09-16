@@ -244,6 +244,10 @@ menu_do_sync() {
   fi
   for name in "$@"; do
     warn "sync: $name"
+    if ! _resolve_managed_account_dir "$name"; then
+      warn "sync: $name: unsafe account target refused"
+      continue
+    fi
     heal_account "$name" || warn "sync: $name: link repair failed"
     sync_project_memory "$name" || warn "sync: $name: memory sync failed"
   done

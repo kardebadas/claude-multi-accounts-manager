@@ -358,6 +358,55 @@ test_link_repair_backs_up_a_real_directory_with_content() {
   assert_contains "$(cat "${backups[0]}/reviewer.md")" "reviewer agent"
 }
 
+test_link_repair_preserves_repeated_same_second_file_backups_without_clobber() {
+  new_fixture
+  local path="$CLAUDE_MULTI_ROOT/personal/settings.json"
+  local base="$path.bak.20990101T000000Z"
+  printf 'pre-existing backup\n' > "$base"
+  date() { printf '20990101T000000Z\n'; }
+
+  printf 'first displaced file\n' > "$path"
+  link_repair "$path" "../shared/settings.json" real-file
+  rm -- "$path"
+  printf 'second displaced file\n' > "$path"
+  link_repair "$path" "../shared/settings.json" real-file
+  unset -f date
+
+  assert_eq "pre-existing backup" "$(cat "$base")" \
+            "a pre-existing same-second backup is never overwritten"
+  assert_eq "first displaced file" "$(cat "$base.1")" \
+            "the first repaired file remains independently recoverable"
+  assert_eq "second displaced file" "$(cat "$base.1.1")" \
+            "the second repaired file receives another unique backup"
+  assert_link "$path" "../shared/settings.json"
+}
+
+test_link_repair_preserves_repeated_same_second_directory_backups_without_clobber() {
+  new_fixture
+  local path="$CLAUDE_MULTI_ROOT/personal/agents"
+  local base="$path.bak.20990101T000000Z"
+  mkdir -p "$base"
+  printf 'pre-existing directory backup\n' > "$base/agent.md"
+  date() { printf '20990101T000000Z\n'; }
+
+  mkdir -p "$path"
+  printf 'first displaced directory\n' > "$path/agent.md"
+  link_repair "$path" "../shared/agents" real-file
+  rm -- "$path"
+  mkdir -p "$path"
+  printf 'second displaced directory\n' > "$path/agent.md"
+  link_repair "$path" "../shared/agents" real-file
+  unset -f date
+
+  assert_eq "pre-existing directory backup" "$(cat "$base/agent.md")" \
+            "a pre-existing directory backup is never overwritten"
+  assert_eq "first displaced directory" "$(cat "$base.1/agent.md")" \
+            "the first repaired directory remains independently recoverable"
+  assert_eq "second displaced directory" "$(cat "$base.1.1/agent.md")" \
+            "the second repaired directory receives another unique backup"
+  assert_link "$path" "../shared/agents"
+}
+
 test_link_repair_removes_an_empty_real_file_without_a_backup() {
   new_fixture
   : > "$CLAUDE_MULTI_ROOT/personal/settings.json"
@@ -536,6 +585,22 @@ test_heal_account_is_idempotent() {
   assert_absent "${backups[0]}"
 }
 
+test_heal_account_rejects_an_account_resolving_outside_the_managed_root() {
+  new_fixture
+  local external
+  external="$FIXTURE_TMP/external-account"
+  mkdir -p "$external"
+  printf 'external settings\n' > "$external/settings.json"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/escape"
+
+  assert_fails heal_account escape
+  assert_eq "external settings" "$(cat "$external/settings.json")" \
+            "direct healing must not mutate a symlinked external account"
+  assert_eq "" "$(find "$external" -name '*.bak.*' -print)" \
+            "direct healing must create no backup inside the external target"
+  assert_absent "$external/CLAUDE.md"
+}
+
 test_doctor_report_covers_every_item_of_the_named_account_on_stderr() {
   new_fixture
   heal_account personal
@@ -679,6 +744,8 @@ run_test test_link_repair_narrates_to_stderr_and_keeps_stdout_byte_empty
 run_test test_link_repair_rejects_an_unknown_status
 run_test test_link_repair_backs_up_a_real_file_with_content
 run_test test_link_repair_backs_up_a_real_directory_with_content
+run_test test_link_repair_preserves_repeated_same_second_file_backups_without_clobber
+run_test test_link_repair_preserves_repeated_same_second_directory_backups_without_clobber
 run_test test_link_repair_removes_an_empty_real_file_without_a_backup
 run_test test_link_repair_removes_an_empty_real_directory_without_a_backup
 run_test test_path_has_content_sees_dotfiles_in_a_directory
@@ -697,6 +764,7 @@ run_test test_heal_account_repairs_a_mixed_bag_in_one_pass
 run_test test_heal_account_fails_loudly_on_the_dangling_skills_chain
 run_test test_heal_account_still_repairs_other_items_when_one_is_unrepairable
 run_test test_heal_account_is_idempotent
+run_test test_heal_account_rejects_an_account_resolving_outside_the_managed_root
 run_test test_doctor_report_covers_every_item_of_the_named_account_on_stderr
 run_test test_doctor_report_reports_each_account_it_is_given
 run_test test_doctor_report_reports_only_the_accounts_it_is_given

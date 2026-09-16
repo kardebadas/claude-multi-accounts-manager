@@ -24,10 +24,13 @@ list_accounts() {
     return 0
   fi
   for path in "$root"/*; do
-    if [[ ! -d "$path" ]]; then continue; fi
+    if [[ ! -d "$path" || -L "$path" ]]; then continue; fi
     base="${path##*/}"
     if [[ "$base" == .* ]]; then continue; fi
     if is_reserved_name "$base"; then continue; fi
+    if ! validate_name "$base" 2>/dev/null || [[ "$CANONICAL_NAME" != "$base" ]]; then
+      continue
+    fi
     printf '%s\n' "$base"
   done | LC_ALL=C sort
 }
@@ -474,7 +477,8 @@ archive_account() {
     log "backup failed; account '$name' was NOT deleted"
     return 1
   fi
-  if ! mv -- "$tmp" "$final"; then
+  if ! mv -T --no-clobber -- "$tmp" "$final" || \
+     [[ -e "$tmp" || -L "$tmp" || ! -f "$final" || -L "$final" ]]; then
     _remove_safe_trash_file "$tmp" || true
     log "backup failed; account '$name' was NOT deleted"
     return 1
@@ -521,14 +525,16 @@ verify_archive() {
   return 0
 }
 
-# prune_trash — A36.3. Keep the newest regular archives by deterministic
-# byte-wise filename order. Only literal top-level .tgz regular files under the
-# resolved trash directory are candidates; symlinks, directories and unrelated
-# entries are never counted or removed.
+# prune_trash — A36.3. Keep the newest regular archives by their UTC timestamp,
+# using the complete filename as a deterministic tie-breaker. Only literal
+# top-level archives with the tool's account-timestamp name under the resolved
+# trash directory are candidates; symlinks, directories and unrelated entries
+# are never counted or removed.
 prune_trash() {
-  local keep trash f idx total retained=0 trash_rc=0
+  local keep trash f base key idx pos total retained=0 trash_rc=0
   local LC_ALL=C
   local -a archives=()
+  local -a archive_keys=()
 
   if (( $# > 1 )); then
     log "invalid trash retention: expected at most one positive decimal integer"
@@ -553,12 +559,31 @@ prune_trash() {
   fi
   trash="$_SAFE_TRASH_DIR"
   for f in "$trash"/*.tgz; do
-    if [[ -f "$f" && ! -L "$f" ]]; then
+    base="${f##*/}"
+    if [[ -f "$f" && ! -L "$f" && \
+          "$base" =~ ^[a-z0-9][a-z0-9-]{0,31}-([0-9]{8}T[0-9]{6}Z)\.tgz$ ]]; then
       archives+=("$f")
+      archive_keys+=("${BASH_REMATCH[1]}"$'\t'"$base")
     fi
   done
 
   total="${#archives[@]}"
+  # Insertion-sort the parallel arrays. Candidate counts are intentionally
+  # small (the default retention is three), and keeping paths as array values
+  # avoids reparsing filenames or losing quoting through a text pipeline.
+  for (( idx=1; idx<total; idx++ )); do
+    f="${archives[$idx]}"
+    key="${archive_keys[$idx]}"
+    pos="$idx"
+    while (( pos > 0 )) && [[ "$key" < "${archive_keys[$((pos - 1))]}" ]]; do
+      archives[$pos]="${archives[$((pos - 1))]}"
+      archive_keys[$pos]="${archive_keys[$((pos - 1))]}"
+      pos=$(( pos - 1 ))
+    done
+    archives[$pos]="$f"
+    archive_keys[$pos]="$key"
+  done
+
   # A canonical keep value with more digits than the real candidate count is
   # necessarily larger. Return before arithmetic expansion so even an
   # arbitrarily large valid policy cannot overflow or be reinterpreted.
@@ -694,9 +719,9 @@ delete_account() {
     return 1
   fi
   if ! prune_trash; then
-    log "account '$name' was deleted, but old backups could not be pruned"
-    return 1
+    warn "deleted '$name', but old backup cleanup failed; verified backup kept at $archive"
   fi
 
   log "deleted '$name'; backup: $archive (credentials and .claude.json excluded)"
+  return 0
 }
