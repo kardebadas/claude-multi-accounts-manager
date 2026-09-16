@@ -237,3 +237,142 @@ menu_do_doctor() {
   done
   return 0
 }
+
+# first_run_wizard — seed one complete managed root from a read-only source.
+# The live root appears only through the final same-filesystem rename. No
+# account is created; the caller enters the empty menu after success.
+first_run_wizard() (
+  local root root_canon default answer main main_canon
+  local publish_target publish_parent publish_base stage_suffix stage_prefix
+  local stage_template stage build_root
+
+  root="$(multi_root)"
+  root_canon="$(readlink -m -- "$root")" || {
+    warn "first run: cannot resolve managed root: $root"
+    return 1
+  }
+  default="$HOME/.claude"
+  menu_glyphs
+
+  if [[ -e "$root/shared" || -L "$root/shared" || \
+        -e "$root_canon/shared" || -L "$root_canon/shared" ]]; then
+    warn "first run: $root/shared already exists — refusing to re-seed"
+    return 1
+  fi
+
+  {
+    printf '\n'
+    printf '  First run. claude-multi copies the shareable parts of your main\n'
+    printf '  Claude folder into %s/shared and never writes to the source.\n' \
+      "$(home_relative "$root")"
+    printf '\n'
+  } >&2
+
+  while :; do
+    printf '  Main Claude folder [%s] %s ' \
+      "$(home_relative "$default")" "$G_ARROW" >&2
+    if ! IFS= read -r answer; then
+      printf '\n' >&2
+      warn "first run: no answer (end of input) — nothing was seeded"
+      return 1
+    fi
+    answer="$(menu_trim "$answer")"
+
+    if [[ -z "$answer" ]]; then
+      main="$default"
+    else
+      case "$answer" in
+        '~') main="$HOME" ;;
+        '~/'*) main="$HOME/${answer#'~/'}" ;;
+        *) main="$answer" ;;
+      esac
+    fi
+
+    if validate_main_folder "$main"; then
+      break
+    fi
+  done
+
+  main_canon="$(readlink -f -- "$main")" || {
+    warn "first run: cannot resolve main folder: $main"
+    return 1
+  }
+  if _seed_paths_overlap "$main_canon" "$root_canon"; then
+    warn "first run: source and managed root overlap: $main_canon <-> $root_canon"
+    return 1
+  fi
+  if [[ -e "$root" || -L "$root" || -e "$root_canon" || -L "$root_canon" ]]; then
+    warn "first run: managed root already exists — refusing to re-seed: $root_canon"
+    return 1
+  fi
+
+  publish_target="$root_canon"
+  stage_suffix=""
+  while :; do
+    publish_parent="$(dirname -- "$publish_target")" || return 1
+    if [[ -d "$publish_parent" ]]; then
+      break
+    fi
+    if [[ -e "$publish_parent" || -L "$publish_parent" ]]; then
+      warn "first run: managed-root parent is not a directory: $publish_parent"
+      return 1
+    fi
+    stage_suffix="/${publish_target##*/}$stage_suffix"
+    publish_target="$publish_parent"
+  done
+
+  publish_base="${publish_target##*/}"
+  stage_prefix=".$publish_base.first-run."
+  if [[ "$publish_parent" == "/" ]]; then
+    stage_template="/$stage_prefix"'XXXXXXXX'
+  else
+    stage_template="$publish_parent/$stage_prefix"'XXXXXXXX'
+  fi
+  if ! stage="$(mktemp -d "$stage_template")"; then
+    warn "first run: cannot create staging directory beside $publish_target"
+    return 1
+  fi
+  if ! _seed_stage_is_valid "$stage" "$publish_parent" "$stage_prefix"; then
+    rmdir -- "$stage" 2>/dev/null || true
+    warn "first run: created staging directory failed validation: $stage"
+    return 1
+  fi
+  trap 'first_run_status=$?; trap - EXIT INT TERM; _seed_cleanup_stage "$stage" "$publish_parent" "$stage_prefix" || :; exit "$first_run_status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  build_root="$stage$stage_suffix"
+  if ! mkdir -p "$build_root"; then
+    warn "first run: cannot create staged managed root: $build_root"
+    return 1
+  fi
+  if ! seed_shared "$main" "$build_root/shared"; then
+    warn "first run: shared seeding failed — nothing was published"
+    return 1
+  fi
+  if [[ -f "$main/settings.json" ]] && \
+     ! rewrite_hook_paths "$main/settings.json" \
+       "$build_root/shared/settings.json" "$main" "$root_canon/shared"; then
+    warn "first run: final settings rewrite failed — nothing was published"
+    return 1
+  fi
+  if ! CLAUDE_MULTI_ROOT="$build_root" seed_project_memory "$main"; then
+    warn "first run: project-memory seeding failed — nothing was published"
+    return 1
+  fi
+
+  if [[ -e "$publish_target" || -L "$publish_target" ]]; then
+    warn "first run: destination appeared before publication: $publish_target"
+    return 1
+  fi
+  if ! mv -- "$stage" "$publish_target"; then
+    warn "first run: failed to publish staged managed root: $publish_target"
+    return 1
+  fi
+  stage=""
+  trap - EXIT INT TERM
+
+  log "first run: seeded $(home_relative "$root")/shared from $(home_relative "$main")"
+  log "no account was created — press a) in the menu to add one"
+  return 0
+)

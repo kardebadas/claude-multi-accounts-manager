@@ -28,8 +28,10 @@ assert_contains "$err" "0.1.0"
 assert_no_stdout "$bin" --version
 
 # ── no args: the menu path (Phase 6 fills it in) ────────────────────────────
+mkdir -p "$CLAUDE_MULTI_ROOT/shared"
 err="$("$bin" </dev/null 2>&1 >/dev/null)"
-assert_contains "$err" "menu"
+assert_contains "$err" "Claude accounts"
+assert_contains "$err" "no accounts yet"
 assert_no_stdout "$bin" </dev/null
 
 # ── an account name is validated, and a bad one exits 1 ─────────────────────
@@ -44,16 +46,20 @@ assert_no_stdout "$bin" "shared"
 assert_fails "$bin" ".hidden"
 assert_contains "$("$bin" ".hidden" 2>&1 >/dev/null || true)" "may not start with"
 
-# a good name reaches the (Phase 6) launch path, quietly on stdout
-err="$("$bin" work 2>&1 >/dev/null)"
+# a valid but absent name reaches non-first-run account resolution
+assert_fails "$bin" work
+err="$("$bin" work 2>&1 >/dev/null || true)"
 assert_contains "$err" "work"
+assert_contains "$err" "unknown account"
 assert_no_stdout "$bin" work
 # uppercase is lowercased on the way through
-assert_contains "$("$bin" WORK 2>&1 >/dev/null)" "work"
+assert_fails "$bin" WORK
+assert_contains "$("$bin" WORK 2>&1 >/dev/null || true)" "work"
 
 # ── no CLI verbs: 'add' is just an account name ─────────────────────────────
 for verb in add delete sync doctor; do
-  err="$("$bin" "$verb" 2>&1 >/dev/null)"
+  assert_fails "$bin" "$verb"
+  err="$("$bin" "$verb" 2>&1 >/dev/null || true)"
   assert_contains "$err" "$verb"
   assert_eq "" "$(printf '%s' "$err" | grep -i "unknown command" || true)" \
     "$verb must be treated as an account name, not a verb"

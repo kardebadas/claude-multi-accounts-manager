@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/tests/assert.sh"
+. "$REPO_ROOT/tests/fixtures/main-folder.sh"
 
 REAL_HOME="${REAL_HOME_GUARD:-$HOME}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cm-launch.XXXXXX")"
@@ -233,6 +234,79 @@ entrypoint_in_subshell() {
     require_fake_claude_wiring "$REPO_ROOT/tests/fake-claude"
     exec "$CLAUDE_MULTI_ENTRYPOINT" "$@"
   )
+}
+
+# first_run_drive <record-prefix> <input> <out> <err> [claude-multi-args...]
+# Drive the complete wrapper with scripted stdin while retaining its real exit
+# status. The caller controls only temporary HOME/root/PATH values.
+first_run_drive() {
+  local rec="$1" input="$2" out="$3" err="$4" rc=0
+  shift 4
+  set +e
+  printf '%s' "$input" | entrypoint_in_subshell "$rec" "$@" > "$out" 2> "$err"
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+# wizard_direct <input> <out> <err>
+# Exercise refusal paths that normal dispatch cannot reach once a root exists.
+wizard_direct() {
+  local input="$1" out="$2" err="$3" rc=0
+  set +e
+  printf '%s' "$input" | (
+    set -euo pipefail
+    . "$CLAUDE_MULTI_ENTRYPOINT"
+    first_run_wizard
+  ) > "$out" 2> "$err"
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+# Install a deterministic mv boundary for the outer first-run publication.
+# Inner seed/settings renames still execute the real mv unchanged.
+install_first_run_mv_gate() {
+  local mode gate real_mv
+  mode="$1"
+  gate="$TMP/mv-gate-$mode"
+  real_mv="$(command -v mv)"
+  mkdir -p "$gate"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'REAL_MV=%q\n' "$real_mv"
+    cat <<'GATE'
+args=("$@")
+argc=${#args[@]}
+source_path="${args[$((argc - 2))]}"
+target_path="${args[$((argc - 1))]}"
+if [[ "$target_path" == "$FIRST_RUN_GATE_TARGET" ]]; then
+  case "$FIRST_RUN_GATE_MODE" in
+    inspect)
+      [[ ! -e "$target_path" && ! -L "$target_path" ]] || exit 91
+      [[ "$(dirname -- "$source_path")" == "$(dirname -- "$target_path")" ]] || exit 92
+      [[ -f "$source_path/shared/CLAUDE.md" ]] || exit 93
+      find "$source_path/shared/project-memory" -type f -name MEMORY.md -print -quit |
+        grep -q . || exit 94
+      printf 'complete-staged-root\n' > "$FIRST_RUN_GATE_MARKER"
+      ;;
+    fail)
+      exit 95
+      ;;
+    term)
+      kill -TERM "$PPID"
+      exit 143
+      ;;
+    *)
+      exit 96
+      ;;
+  esac
+fi
+exec "$REAL_MV" "$@"
+GATE
+  } > "$gate/mv"
+  chmod 700 "$gate/mv"
+  printf '%s' "$gate"
 }
 
 test_fixture_guard_refuses_real_home_and_root() {
@@ -683,6 +757,167 @@ test_complete_wrapper_refuses_relative_root_before_launch() {
     "root refusal must leave stdout byte-empty"
   assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
     "root refusal must happen before Claude"
+}
+
+test_first_run_seeds_the_full_tree_atomically_then_shows_an_empty_menu() {
+  local main project slug gate rec="$TMP/first-run-atomic"
+  local out="$TMP/first-run-atomic.out" rc=0 err
+  main="$(make_fixture_main "$TMP/first-run-source")"
+  project="$TMP/first-run-project/app"
+  mkdir -p "$project"
+  slug="${project//[!a-zA-Z0-9]/-}"
+  mkdir -p "$main/projects/$slug/memory"
+  printf '%s\n' 'remember atomically' > "$main/projects/$slug/memory/MEMORY.md"
+  gate="$(install_first_run_mv_gate inspect)"
+  export FIRST_RUN_GATE_TARGET="$CLAUDE_MULTI_ROOT"
+  export FIRST_RUN_GATE_MODE=inspect
+  export FIRST_RUN_GATE_MARKER="$TMP/first-run-atomic.marker"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\nq\n' "$out" "$rec.err" work -p ignored)"
+  err="$(cat "$rec.err")"
+
+  assert_eq "0" "$rc" "a successful first run followed by q must exit cleanly"
+  assert_eq "complete-staged-root" "$(cat "$FIRST_RUN_GATE_MARKER")" \
+    "the outer rename must receive one complete staged root on the same parent"
+  assert_eq "remember atomically" \
+    "$(cat "$CLAUDE_MULTI_ROOT/shared/project-memory/$slug/MEMORY.md")" \
+    "project memory must be inside the atomically published root"
+  assert_contains "$(cat "$CLAUDE_MULTI_ROOT/shared/settings.json")" \
+    "$CLAUDE_MULTI_ROOT/shared/hooks/post-commit-practices.sh" \
+    "published settings must name the final shared hooks path"
+  assert_eq "" \
+    "$(grep -F '.first-run.' "$CLAUDE_MULTI_ROOT/shared/settings.json" || true)" \
+    "published settings must not retain a staging path"
+  assert_contains "$err" "Main Claude folder" "first run must ask for its read-only source"
+  assert_contains "$err" "Claude accounts" "the menu must follow publication"
+  assert_contains "$err" "no accounts yet" "first run must create no account"
+  assert_eq "shared" "$(find "$CLAUDE_MULTI_ROOT" -mindepth 1 -maxdepth 1 -printf '%f\n')" \
+    "only shared state may exist after first run"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the complete first-run wrapper must leave stdout byte-empty"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)" \
+    "an account argument on first run must not launch or create an account"
+}
+
+test_first_run_defaults_to_home_claude_and_reasks_after_invalid_input() {
+  local main rec="$TMP/first-run-reask" out="$TMP/first-run-reask.out" rc=0 err
+  mkdir -p "$TMP/not-a-claude-folder"
+  main="$(make_fixture_main "$HOME")"
+
+  rc="$(first_run_drive "$rec" \
+    "$TMP/not-a-claude-folder"$'\n\nq\n' "$out" "$rec.err")"
+  err="$(cat "$rec.err")"
+
+  assert_eq "0" "$rc" "a valid default answer after a rejection must seed and enter the menu"
+  assert_contains "$err" "$TMP/not-a-claude-folder" "the invalid source must be identified"
+  assert_contains "$err" "~/.claude" "the prompt must advertise the default source"
+  assert_eq "# fixture global CLAUDE.md" \
+    "$(cat "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+    "a blank retry must select HOME/.claude"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "$HOME/.claude" "$main" "the fixture must exercise the advertised default"
+}
+
+test_first_run_refuses_existing_shared_without_consuming_an_answer() {
+  mk_root
+  printf '%s\n' 'hand edited' > "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md"
+  local out="$TMP/first-run-reseed.out" errfile="$TMP/first-run-reseed.err" rc=0 err
+
+  rc="$(wizard_direct 'answer-must-not-be-read' "$out" "$errfile")"
+  err="$(cat "$errfile")"
+
+  assert_eq "1" "$rc" "A38 requires a direct re-seed attempt to fail"
+  assert_contains "$err" "re-seed" "the refusal must explain the protected state"
+  assert_eq "" "$(printf '%s' "$err" | grep -F 'Main Claude folder' || true)" \
+    "the wizard must refuse before prompting"
+  assert_eq "hand edited" "$(cat "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+    "existing shared state must remain untouched"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+}
+
+test_first_run_rejects_both_source_root_nesting_directions_without_writes() {
+  local main before after rec="$TMP/first-run-overlap" rc=0
+
+  main="$(make_fixture_main "$TMP/source-contains-root")"
+  export CLAUDE_MULTI_ROOT="$main/managed-root"
+  before="$(snapshot_tree "$main")"
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  after="$(snapshot_tree "$main")"
+  assert_eq "1" "$rc" "a managed root inside the source must be refused"
+  assert_contains "$(cat "$rec.err")" "overlap"
+  assert_eq "$before" "$after" "containment refusal must not even change source metadata"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT" ]]; then printf yes; else printf no; fi)"
+
+  export CLAUDE_MULTI_ROOT="$TMP/root-contains-source"
+  main="$(make_fixture_main "$CLAUDE_MULTI_ROOT/source-parent")"
+  before="$(snapshot_tree "$main")"
+  rc="$(wizard_direct "$main"$'\n' "$rec.reverse.out" "$rec.reverse.err")"
+  after="$(snapshot_tree "$main")"
+  assert_eq "1" "$rc" "a source inside the managed root must be refused"
+  assert_contains "$(cat "$rec.reverse.err")" "overlap"
+  assert_eq "$before" "$after" "reverse containment refusal must leave the source unchanged"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT/shared" ]]; then printf yes; else printf no; fi)"
+}
+
+test_first_run_leaves_the_source_byte_and_mtime_identical() {
+  local main before after rec="$TMP/first-run-source-ro" rc=0
+  main="$(make_fixture_main "$TMP/source-read-only")"
+  before="$(snapshot_tree "$main")"
+
+  rc="$(first_run_drive "$rec" "$main"$'\nq\n' "$rec.out" "$rec.err")"
+  after="$(snapshot_tree "$main")"
+
+  assert_eq "0" "$rc"
+  assert_eq "# fixture global CLAUDE.md" \
+    "$(cat "$CLAUDE_MULTI_ROOT/shared/CLAUDE.md")" \
+    "the immutability assertion must cover a completed seed"
+  assert_eq "$before" "$after" "first run must leave every source byte and mtime unchanged"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
+}
+
+test_first_run_failed_publication_removes_staging_and_live_state() {
+  local main gate rec="$TMP/first-run-fail" rc=0 parent base
+  main="$(make_fixture_main "$TMP/source-failed-publish")"
+  gate="$(install_first_run_mv_gate fail)"
+  export FIRST_RUN_GATE_TARGET="$CLAUDE_MULTI_ROOT"
+  export FIRST_RUN_GATE_MODE=fail
+  export FIRST_RUN_GATE_MARKER="$TMP/unused-fail-marker"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  parent="$(dirname -- "$CLAUDE_MULTI_ROOT")"
+  base="${CLAUDE_MULTI_ROOT##*/}"
+
+  assert_eq "1" "$rc" "a failed outer rename must fail first run"
+  assert_contains "$(cat "$rec.err")" "publish"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT" || -L "$CLAUDE_MULTI_ROOT" ]]; then printf yes; else printf no; fi)" \
+    "failed publication must expose no live root"
+  assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
+    "failed publication must remove its validated staging directory"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
+}
+
+test_first_run_term_during_publication_is_recoverable() {
+  local main gate rec="$TMP/first-run-term" rc=0 parent base
+  main="$(make_fixture_main "$TMP/source-term-publish")"
+  gate="$(install_first_run_mv_gate term)"
+  export FIRST_RUN_GATE_TARGET="$CLAUDE_MULTI_ROOT"
+  export FIRST_RUN_GATE_MODE=term
+  export FIRST_RUN_GATE_MARKER="$TMP/unused-term-marker"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  parent="$(dirname -- "$CLAUDE_MULTI_ROOT")"
+  base="${CLAUDE_MULTI_ROOT##*/}"
+
+  assert_eq "yes" "$(if (( rc != 0 )); then printf yes; else printf no; fi)" \
+    "TERM during final publication must fail the invocation"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT" || -L "$CLAUDE_MULTI_ROOT" ]]; then printf yes; else printf no; fi)" \
+    "interruption must leave no partial live root"
+  assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
+    "interruption recovery must remove validated staging"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
 }
 
 # Harness-teeth mutation proof: copy this file's real dispatcher beneath an
