@@ -7,6 +7,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$REPO/tests/assert.sh"
 . "$REPO/lib/util.sh"
 . "$REPO/lib/config.sh"
+. "$REPO/lib/links.sh"
 . "$REPO/lib/memory.sh"
 
 yesno() {
@@ -15,6 +16,17 @@ yesno() {
   else
     printf 'no\n'
   fi
+}
+
+tree_snapshot() {
+  local root="$1"
+  (
+    cd -- "$root"
+    {
+      find . -printf '%p %y %s %l\n'
+      find . -type f -exec cksum {} +
+    } | LC_ALL=C sort | cksum
+  )
 }
 
 slug_oracle() {
@@ -652,6 +664,62 @@ t_sync_refuses_an_unknown_account_without_exiting() {
     "the refusal must be narrated on stderr"
   assert_eq "yes" "$(yesno test -d "$FIX_ROOT/personal")" \
     "the refusal must not have torn anything down"
+  cleanup_memory_fixture
+}
+
+t_sync_direct_call_refuses_a_symlinked_account_without_external_mutation() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  local external="$FIX_BASE/external-account"
+  mkdir -p "$external"
+  printf 'external sentinel bytes\n' > "$external/sentinel.txt"
+  ln -s "$external" "$FIX_ROOT/escape"
+  local root_before external_before rc=0 out="$FIX_BASE/symlink-sync.out" err
+  root_before="$(tree_snapshot "$FIX_ROOT")"
+  external_before="$(tree_snapshot "$external")"
+
+  sync_project_memory escape >"$out" 2>"$FIX_BASE/symlink-sync.err" || rc=$?
+  err="$(cat "$FIX_BASE/symlink-sync.err")"
+
+  assert_eq "1" "$rc" "direct sync must reject a symlinked account"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "symlink refusal writes zero bytes to stdout"
+  assert_eq "$root_before" "$(tree_snapshot "$FIX_ROOT")" \
+    "symlink refusal leaves the managed root byte-for-byte unchanged"
+  assert_eq "$external_before" "$(tree_snapshot "$external")" \
+    "symlink refusal leaves the external target byte-for-byte unchanged"
+  assert_eq "no" "$(yesno test -e "$external/projects")" \
+    "symlink refusal creates no external project directory"
+  assert_contains "$err" "refusing account mutation" \
+    "the direct-call refusal explains the containment boundary"
+  cleanup_memory_fixture
+}
+
+t_sync_direct_call_refuses_traversal_before_path_composition() {
+  make_memory_fixture
+  seed_project_memory "$FIX_MAIN" 2>/dev/null
+  local external="$FIX_BASE/external-account"
+  mkdir -p "$external"
+  printf 'external sentinel bytes\n' > "$external/sentinel.txt"
+  local root_before external_before rc=0 out="$FIX_BASE/traversal-sync.out" err
+  root_before="$(tree_snapshot "$FIX_ROOT")"
+  external_before="$(tree_snapshot "$external")"
+
+  sync_project_memory ../external-account >"$out" \
+    2>"$FIX_BASE/traversal-sync.err" || rc=$?
+  err="$(cat "$FIX_BASE/traversal-sync.err")"
+
+  assert_eq "1" "$rc" "direct sync must reject a traversal-shaped account"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "traversal refusal writes zero bytes to stdout"
+  assert_eq "$root_before" "$(tree_snapshot "$FIX_ROOT")" \
+    "traversal refusal leaves the managed root byte-for-byte unchanged"
+  assert_eq "$external_before" "$(tree_snapshot "$external")" \
+    "traversal refusal leaves the external target byte-for-byte unchanged"
+  assert_eq "no" "$(yesno test -e "$external/projects")" \
+    "traversal refusal creates no external project directory"
+  assert_contains "$err" "invalid account name" \
+    "the traversal-shaped value is rejected by the canonical name policy"
   cleanup_memory_fixture
 }
 

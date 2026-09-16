@@ -5,6 +5,8 @@
 # below emit data on stdout only from data producers. Reconstruction validates
 # candidates against directories on disk; worktree filtering uses that decoded
 # path so lossy slug punctuation cannot create false positives.
+# Mutating account sync consumes links.sh's _resolve_managed_account_dir so its
+# canonical name, root, and containment policy stays identical to link healing.
 
 # slug_of_path <abs_path> -> slug
 slug_of_path() {
@@ -253,17 +255,17 @@ store_slugs() {
 sync_project_memory() {
   local account="${1:?sync_project_memory: account required}"
   local account_path slug link target link_status linked=0
-  account_path="$(account_dir "$account")"
-  if [[ ! -d "$account_path" ]]; then
-    warn "sync_project_memory: no such account: $account"
+  if ! _resolve_managed_account_dir "$account"; then
+    warn "sync_project_memory: no such account or unsafe target: $account"
     return 1
   fi
+  account_path="$_SAFE_ACCOUNT_DIR"
 
   while IFS= read -r slug; do
     if [[ -z $slug ]]; then
       continue
     fi
-    link="$(memory_link_path "$account" "$slug")"
+    link="$account_path/projects/$slug/memory"
     target="$(memory_link_target "$slug")"
     if _memory_link_sync_one "$link" "$target" "$account/$slug"; then
       linked=$((linked + 1))
