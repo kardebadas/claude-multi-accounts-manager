@@ -93,9 +93,25 @@ dispatch_args() {
 
 main() {
   require_bash4 || return 1
-  local root=""
+  local root="" resolved_root=""
   root="$(multi_root)"
   validate_root_path "$root" || return 1
+  if [[ -e "$root" || -L "$root" ]]; then
+    _resolve_managed_root || return 1
+    if [[ "$root" != "$_SAFE_MANAGED_ROOT" ]]; then
+      log "refusing operation: symlinked managed root '$root' resolves to '$_SAFE_MANAGED_ROOT'"
+      return 1
+    fi
+  else
+    resolved_root="$(readlink -m -- "$root")" || {
+      log "refusing operation: cannot resolve managed root '$root'"
+      return 1
+    }
+    if [[ "$root" != "$resolved_root" ]]; then
+      log "refusing operation: symlinked managed root '$root' resolves to '$resolved_root'"
+      return 1
+    fi
+  fi
   dispatch_args "$@"
 }
 

@@ -189,8 +189,12 @@ memory_link_target() {
 seed_project_memory() {
   local main="${1:?seed_project_memory: main folder required}"
   local dest src slug seeded=0
+  local -a seeded_slugs=()
   dest="$(project_memory_store)"
-  mkdir -p "$dest"
+  if ! mkdir -p "$dest"; then
+    warn "project-memory: cannot create destination: $dest"
+    return 1
+  fi
 
   while IFS= read -r slug; do
     if [[ -z $slug ]]; then
@@ -206,13 +210,22 @@ seed_project_memory() {
     if ! slug_is_eligible "$slug"; then
       continue
     fi
-    mkdir -p "$dest/$slug"
-    cp -a "$src/." "$dest/$slug/"
-    log "project-memory: seeded $slug"
+    if ! mkdir -p "$dest/$slug"; then
+      warn "project-memory: cannot create destination for $slug"
+      return 1
+    fi
+    if ! cp -a "$src/." "$dest/$slug/"; then
+      warn "project-memory: failed to copy $slug"
+      return 1
+    fi
+    seeded_slugs+=("$slug")
     seeded=$((seeded + 1))
   done < <(project_slugs "$main")
 
   if (( seeded > 0 )); then
+    for slug in ${seeded_slugs[@]+"${seeded_slugs[@]}"}; do
+      log "project-memory: seeded $slug"
+    done
     log "project-memory: seeded $seeded project memory folder(s)"
   fi
   return 0

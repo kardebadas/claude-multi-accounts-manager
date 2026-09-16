@@ -109,6 +109,27 @@ menu_trim() {
   printf '%s' "$value"
 }
 
+# menu_parse_index <decimal> <maximum> — validate before any arithmetic.
+# The normalized result is returned through MENU_INDEX so stdout stays unused.
+menu_parse_index() {
+  local value="${1-}" maximum="${2-}"
+  MENU_INDEX=""
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  while [[ ${#value} -gt 1 && "${value:0:1}" == "0" ]]; do
+    value="${value:1}"
+  done
+  if [[ "$value" == "0" || ${#value} -gt ${#maximum} ]]; then
+    return 1
+  fi
+  if [[ ${#value} -eq ${#maximum} ]] && (( 10#$value > maximum )); then
+    return 1
+  fi
+  MENU_INDEX=$((10#$value))
+  return 0
+}
+
 # menu_accounts — fill the caller's names array in list_accounts order.
 menu_accounts() {
   local line
@@ -144,11 +165,9 @@ menu_loop() {
       x|X) menu_do_doctor ${names[@]+"${names[@]}"}; continue ;;
     esac
 
-    if [[ "$selection" =~ ^[0-9]+$ ]]; then
-      index=$((10#$selection))
-      if (( index >= 1 && index <= ${#names[@]} )); then
-        launch_account "${names[$((index - 1))]}"
-      fi
+    if menu_parse_index "$selection" "${#names[@]}"; then
+      index="$MENU_INDEX"
+      launch_account "${names[$((index - 1))]}"
     fi
 
     warn "invalid selection: '$selection'"
@@ -173,12 +192,10 @@ menu_pick() {
   fi
   selection="$(menu_trim "$selection")"
 
-  if [[ "$selection" =~ ^[0-9]+$ ]]; then
-    index=$((10#$selection))
-    if (( index >= 1 && index <= ${#names[@]} )); then
-      printf '%s' "${names[$((index - 1))]}"
-      return 0
-    fi
+  if menu_parse_index "$selection" "${#names[@]}"; then
+    index="$MENU_INDEX"
+    printf '%s' "${names[$((index - 1))]}"
+    return 0
   fi
 
   warn "invalid selection: '$selection'"
@@ -199,7 +216,14 @@ menu_do_add() {
     warn "cancelled"
     return 0
   fi
-  add_account "$name" || warn "add failed"
+  if ! add_account "$name"; then
+    warn "add failed"
+    return 0
+  fi
+  name="$CANONICAL_NAME"
+  if offer_launch "$name"; then
+    launch_account "$name" || warn "launch failed"
+  fi
   return 0
 }
 
@@ -365,7 +389,8 @@ first_run_wizard() (
     warn "first run: destination appeared before publication: $publish_target"
     return 1
   fi
-  if ! mv -- "$stage" "$publish_target"; then
+  if ! mv -T --no-clobber -- "$stage" "$publish_target" || \
+     [[ -e "$stage" || -L "$stage" || ! -d "$publish_target" || -L "$publish_target" ]]; then
     warn "first run: failed to publish staged managed root: $publish_target"
     return 1
   fi

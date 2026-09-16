@@ -293,6 +293,10 @@ if [[ "$target_path" == "$FIRST_RUN_GATE_TARGET" ]]; then
     fail)
       exit 95
       ;;
+    collision)
+      mkdir -- "$target_path"
+      printf 'competitor\n' > "$target_path/sentinel"
+      ;;
     term)
       kill -TERM "$PPID"
       exit 143
@@ -306,6 +310,41 @@ exec "$REAL_MV" "$@"
 GATE
   } > "$gate/mv"
   chmod 700 "$gate/mv"
+  printf '%s' "$gate"
+}
+
+# Fail one project-memory filesystem boundary while delegating every earlier
+# first-run operation to the real command.
+install_first_run_memory_gate() {
+  local command="$1" gate real_command
+  gate="$TMP/memory-gate-$command"
+  real_command="$(command -v "$command")"
+  mkdir -p "$gate"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'REAL_COMMAND=%q\n' "$real_command"
+    printf 'GATED_COMMAND=%q\n' "$command"
+    cat <<'GATE'
+if [[ "$GATED_COMMAND" == mkdir ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == */shared/project-memory ]]; then
+      exit 73
+    fi
+  done
+elif [[ "$GATED_COMMAND" == cp ]]; then
+  args=("$@")
+  argc=${#args[@]}
+  source_path="${args[$((argc - 2))]}"
+  target_path="${args[$((argc - 1))]}"
+  if [[ "$source_path" == */projects/*/memory/. && \
+        "$target_path" == */shared/project-memory/*/ ]]; then
+    exit 74
+  fi
+fi
+exec "$REAL_COMMAND" "$@"
+GATE
+  } > "$gate/$command"
+  chmod 700 "$gate/$command"
   printf '%s' "$gate"
 }
 
@@ -759,6 +798,106 @@ test_complete_wrapper_refuses_relative_root_before_launch() {
     "root refusal must happen before Claude"
 }
 
+test_complete_wrapper_refuses_filesystem_root() {
+  local rec="$TMP/wrapper-filesystem-root" out="$TMP/wrapper-filesystem-root.out"
+  local rc=0 err
+  export CLAUDE_MULTI_ROOT="/"
+  set +e
+  entrypoint_in_subshell "$rec" --version > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "1" "$rc" "the filesystem root must be refused"
+  assert_contains "$err" "unsafe managed root"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)"
+}
+
+test_complete_wrapper_refuses_home_as_managed_root_before_healing() {
+  local rec="$TMP/wrapper-home-root" out="$TMP/wrapper-home-root.out"
+  local rc=0 err
+  export CLAUDE_MULTI_ROOT="$HOME"
+  mkdir -p "$HOME/shared" "$HOME/work"
+  printf 'home sentinel\n' > "$HOME/shared/CLAUDE.md"
+  set +e
+  entrypoint_in_subshell "$rec" work > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "1" "$rc" "HOME itself must be refused as the managed root"
+  assert_contains "$err" "unsafe managed root"
+  assert_eq "no" "$(if [[ -e "$HOME/work/CLAUDE.md" || -L "$HOME/work/CLAUDE.md" ]]; then printf yes; else printf no; fi)" \
+    "root refusal must happen before account healing mutates HOME"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)"
+}
+
+test_complete_wrapper_refuses_a_managed_root_reached_through_a_symlink() {
+  local rec="$TMP/wrapper-symlink-root" out="$TMP/wrapper-symlink-root.out"
+  local physical="$TMP/physical-parent/root" linked_parent="$TMP/linked-parent"
+  local rc=0 err
+  export CLAUDE_MULTI_ROOT="$physical"
+  mk_root
+  mk_account work
+  ln -s "$TMP/physical-parent" "$linked_parent"
+  export CLAUDE_MULTI_ROOT="$linked_parent/root"
+  set +e
+  entrypoint_in_subshell "$rec" work > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "1" "$rc" "a root reached through a symlinked parent must be refused"
+  assert_contains "$err" "symlinked managed root"
+  assert_eq "no" "$(if [[ -e "$physical/work/CLAUDE.md" || -L "$physical/work/CLAUDE.md" ]]; then printf yes; else printf no; fi)" \
+    "symlink-root refusal must precede account healing"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)"
+}
+
+test_complete_wrapper_refuses_an_account_target_outside_the_managed_root() {
+  local rec="$TMP/wrapper-escaping-account" out="$TMP/wrapper-escaping-account.out"
+  local outside="$TMP/outside-account" rc=0 err
+  mk_root
+  mkdir -p "$outside"
+  ln -s "$outside" "$CLAUDE_MULTI_ROOT/work"
+  set +e
+  entrypoint_in_subshell "$rec" work > "$out" 2> "$rec.err"
+  rc=$?
+  set -e
+  err="$(cat "$rec.err")"
+
+  assert_eq "1" "$rc" "an account resolving outside the managed root must be refused"
+  assert_contains "$err" "unknown account"
+  assert_eq "no" "$(if [[ -e "$outside/CLAUDE.md" || -L "$outside/CLAUDE.md" ]]; then printf yes; else printf no; fi)" \
+    "an escaping account target must remain untouched"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+  assert_eq "no" "$(if [[ -e "$rec.argv" ]]; then printf yes; else printf no; fi)"
+}
+
+test_complete_menu_add_default_launch_preserves_argv_environment_and_stdout() {
+  local rec="$TMP/wrapper-add-launch" out="$TMP/wrapper-add-launch.out"
+  local rc=0 err
+  mk_root
+
+  rc="$(first_run_drive "$rec" $'a\nWork\n\n' "$out" "$rec.err")"
+  err="$(cat "$rec.err")"
+
+  assert_eq "0" "$rc" "default-yes post-add launch must preserve Claude's status"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/work" ]]; then printf yes; else printf no; fi)" \
+    "the menu must create the canonicalized account"
+  assert_contains "$err" "launch claude in 'work' now to log in? [Y/n]"
+  assert_eq "0" "$(rec_argc "$rec")" \
+    "a menu-initiated login launch passes no invented Claude arguments"
+  assert_eq "$CLAUDE_MULTI_ROOT/work" "$(rec_env_val "$rec" CLAUDE_CONFIG_DIR)"
+  assert_eq "$CLAUDE_MULTI_ROOT/shared/plugin-cache" \
+    "$(rec_env_val "$rec" CLAUDE_CODE_PLUGIN_CACHE_DIR)"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+    "the complete post-add launch path leaves stdout byte-empty"
+}
+
 test_first_run_seeds_the_full_tree_atomically_then_shows_an_empty_menu() {
   local main project slug gate rec="$TMP/first-run-atomic"
   local out="$TMP/first-run-atomic.out" rc=0 err
@@ -895,6 +1034,85 @@ test_first_run_failed_publication_removes_staging_and_live_state() {
     "failed publication must expose no live root"
   assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
     "failed publication must remove its validated staging directory"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
+}
+
+test_first_run_publication_collision_preserves_destination_and_fails() {
+  local main gate rec="$TMP/first-run-collision" rc=0 parent base
+  main="$(make_fixture_main "$TMP/source-collision-publish")"
+  gate="$(install_first_run_mv_gate collision)"
+  export FIRST_RUN_GATE_TARGET="$CLAUDE_MULTI_ROOT"
+  export FIRST_RUN_GATE_MODE=collision
+  export FIRST_RUN_GATE_MARKER="$TMP/unused-collision-marker"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  parent="$(dirname -- "$CLAUDE_MULTI_ROOT")"
+  base="${CLAUDE_MULTI_ROOT##*/}"
+
+  assert_eq "1" "$rc" "a destination appearing at publication must fail first run"
+  assert_eq "competitor" "$(cat "$CLAUDE_MULTI_ROOT/sentinel")" \
+    "the competing destination must remain untouched"
+  assert_eq "sentinel" \
+    "$(find "$CLAUDE_MULTI_ROOT" -mindepth 1 -maxdepth 1 -printf '%f\n')" \
+    "publication must not move the staged tree inside the competing destination"
+  assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
+    "a publication collision must remove the validated staging directory"
+  assert_contains "$(cat "$rec.err")" "publish"
+  assert_eq "" "$(grep -F 'first run: seeded' "$rec.err" || true)" \
+    "a publication collision must not report false success"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
+}
+
+test_first_run_project_memory_destination_failure_publishes_nothing() {
+  local main project slug gate rec="$TMP/first-run-memory-mkdir" rc=0 parent base
+  main="$(make_fixture_main "$TMP/source-memory-mkdir")"
+  project="$TMP/project-memory-mkdir/app"
+  mkdir -p "$project"
+  slug="${project//[!a-zA-Z0-9]/-}"
+  mkdir -p "$main/projects/$slug/memory"
+  printf 'must not publish\n' > "$main/projects/$slug/memory/MEMORY.md"
+  gate="$(install_first_run_memory_gate mkdir)"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  parent="$(dirname -- "$CLAUDE_MULTI_ROOT")"
+  base="${CLAUDE_MULTI_ROOT##*/}"
+
+  assert_eq "1" "$rc" "project-memory destination creation failure must fail first run"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT" || -L "$CLAUDE_MULTI_ROOT" ]]; then printf yes; else printf no; fi)" \
+    "destination creation failure must publish no live root"
+  assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
+    "destination creation failure must remove staging"
+  assert_contains "$(cat "$rec.err")" "project-memory seeding failed"
+  assert_eq "" "$(grep -F 'project-memory: seeded' "$rec.err" || true)" \
+    "an incomplete memory seed must emit no success message"
+  assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
+}
+
+test_first_run_project_memory_copy_failure_publishes_nothing() {
+  local main project slug gate rec="$TMP/first-run-memory-cp" rc=0 parent base
+  main="$(make_fixture_main "$TMP/source-memory-cp")"
+  project="$TMP/project-memory-cp/app"
+  mkdir -p "$project"
+  slug="${project//[!a-zA-Z0-9]/-}"
+  mkdir -p "$main/projects/$slug/memory"
+  printf 'must not publish\n' > "$main/projects/$slug/memory/MEMORY.md"
+  gate="$(install_first_run_memory_gate cp)"
+  export PATH="$gate:$PATH"
+
+  rc="$(first_run_drive "$rec" "$main"$'\n' "$rec.out" "$rec.err")"
+  parent="$(dirname -- "$CLAUDE_MULTI_ROOT")"
+  base="${CLAUDE_MULTI_ROOT##*/}"
+
+  assert_eq "1" "$rc" "project-memory copy failure must fail first run"
+  assert_eq "no" "$(if [[ -e "$CLAUDE_MULTI_ROOT" || -L "$CLAUDE_MULTI_ROOT" ]]; then printf yes; else printf no; fi)" \
+    "copy failure must publish no live root"
+  assert_eq "" "$(find "$parent" -maxdepth 1 -name ".$base.first-run.*" -print)" \
+    "copy failure must remove staging"
+  assert_contains "$(cat "$rec.err")" "project-memory seeding failed"
+  assert_eq "" "$(grep -F 'project-memory: seeded' "$rec.err" || true)" \
+    "an incomplete memory copy must emit no success message"
   assert_eq "0" "$(wc -c < "$rec.out" | tr -d '[:space:]')"
 }
 
