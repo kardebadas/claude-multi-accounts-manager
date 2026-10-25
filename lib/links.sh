@@ -122,7 +122,7 @@ _resolve_managed_account_dir() {
     return 1
   fi
   root="$(multi_root)"
-  if ! validate_root_path "$root" || [[ -L "$root" || ! -d "$root" ]]; then
+  if ! validate_managed_root_source "$root" || [[ -L "$root" || ! -d "$root" ]]; then
     warn "refusing account mutation through an unsafe managed root: $root"
     return 1
   fi

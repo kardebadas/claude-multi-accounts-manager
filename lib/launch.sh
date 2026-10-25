@@ -17,6 +17,8 @@ launch_account() {
     die "unknown account: '$name' (run claude-multi with no arguments to see the list)"
   fi
 
+  _resolve_managed_account_dir "$name" || return 1
+
   if ! heal_account "$name"; then
     warn "some shared links for '$name' could not be repaired; launching anyway"
   fi

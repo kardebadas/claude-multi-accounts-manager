@@ -57,7 +57,9 @@ directory beside the destination, rewrites matching hook paths in the copied
 `settings.json`, seeds eligible project memory, and publishes the complete
 managed root with one final rename. The source folder is read-only: it is not
 modified, and source and destination are refused when either contains the
-other. A failure or interruption does not publish a partial live root.
+other. Managed roots that overlap `~/.claude` are always refused, including
+when a different source folder is selected. A failure or interruption does not
+publish a partial live root.
 
 First run creates no account. After seeding, the empty account menu appears;
 choose `a` to add the first account.
@@ -157,9 +159,16 @@ similarly named components such as `wt-dashboard` are not skipped.
 
 There is no general system-path or “junk path” filter. For example, `-tmp` is
 eligible when it uniquely decodes to the existing `/tmp` directory and has a
-memory directory in the source. `sync` creates or repairs account links for
-the memories already in the shared store. The current release does not
-automatically enroll a newly appeared account project into that store.
+memory directory in the source. Each launch and `sync` also enrolls new eligible
+account projects. When no shared memory exists, an existing physical local
+memory directory is moved intact into the shared store, or an empty shared
+directory is created. The account then links to that shared directory. When
+shared memory already exists, a real local memory directory is backed up beside
+it before relinking; its contents are not merged or discarded. Ambiguous slugs
+and slugs that exceed the decoder search cap are skipped.
+
+Symlinked project parents, shared directories, and shared memory targets are
+refused before memory sync writes through them.
 
 ## Deleting an account
 
@@ -220,6 +229,9 @@ independently review the complete tracked inventory and history.
   gate. That absence is not evidence that the daemon is disabled or that its
   state relocates correctly. Treat Remote Control availability and account
   isolation as unknown for managed accounts.
+- The Linux process check cannot inspect unreadable environments belonging to
+  other users. A visible same-user process with an unreadable environment blocks
+  deletion because account use cannot be established safely.
 - All accounts share one plugin cache. Install or update plugins from one
   account at a time.
 - `settings.json` is genuinely shared. Account-specific settings placed there

@@ -275,6 +275,7 @@ first_run_wizard() (
   local stage_template stage build_root
 
   root="$(multi_root)"
+  validate_managed_root_source "$root" || return 1
   root_canon="$(readlink -m -- "$root")" || {
     warn "first run: cannot resolve managed root: $root"
     return 1
@@ -378,13 +379,13 @@ first_run_wizard() (
     warn "first run: shared seeding failed — nothing was published"
     return 1
   fi
-  if [[ -f "$main/settings.json" ]] && \
-     ! rewrite_hook_paths "$main/settings.json" \
+  if [[ -f "$main_canon/settings.json" ]] && \
+     ! rewrite_hook_paths "$main_canon/settings.json" \
        "$build_root/shared/settings.json" "$main" "$root_canon/shared"; then
     warn "first run: final settings rewrite failed — nothing was published"
     return 1
   fi
-  if ! CLAUDE_MULTI_ROOT="$build_root" seed_project_memory "$main"; then
+  if ! CLAUDE_MULTI_ROOT="$build_root" seed_project_memory "$main_canon"; then
     warn "first run: project-memory seeding failed — nothing was published"
     return 1
   fi

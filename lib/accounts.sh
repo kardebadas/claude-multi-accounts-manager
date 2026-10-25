@@ -59,21 +59,33 @@ add_account() {
   # is_reserved_name, then returns the one canonical spelling through this
   # stdout-safe variable.
   name="$CANONICAL_NAME"
-  acct="$(account_dir "$name")"
+  _resolve_managed_root || return 1
+  acct="$_SAFE_MANAGED_ROOT/$name"
   if [[ -e "$acct" || -L "$acct" ]]; then
     log "account '$name' already exists at $acct"
     return 1
   fi
 
-  mkdir -p "$acct"
-  chmod 700 "$acct"
+  if ! mkdir -m 700 -- "$acct"; then
+    warn "cannot create account directory: $acct"
+    return 1
+  fi
+  _resolve_managed_account_dir "$name" || return 1
+  if ! chmod 700 "$acct"; then
+    warn "cannot secure account directory: $acct"
+    return 1
+  fi
 
   if ! heal_account "$name"; then
     warn "some shared links for '$name' could not be created; run sync after fixing shared/"
   fi
 
-  printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "$acct/.claude.json"
-  chmod 600 "$acct/.claude.json"
+  if ! ( umask 077; set -o noclobber
+         printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{}}' > "$acct/.claude.json" ) || \
+     ! chmod 600 "$acct/.claude.json"; then
+    warn "cannot create private account settings: $acct/.claude.json"
+    return 1
+  fi
 
   if ! sync_project_memory "$name"; then
     warn "project-memory sync for '$name' did not complete; run sync from the menu"
@@ -160,7 +172,7 @@ _resolve_managed_root() {
   _SAFE_MANAGED_ROOT=""
   root="$(multi_root)"
 
-  if ! validate_root_path "$root"; then
+  if ! validate_managed_root_source "$root"; then
     log "refusing operation: unsafe managed root '$root'"
     return 1
   fi
@@ -316,19 +328,34 @@ account_in_use() {
   local name="${1:?account_in_use needs an account name}"
   local procdir="${CLAUDE_MULTI_PROC:-/proc}"
   local lsof_cmd="${CLAUDE_MULTI_LSOF:-lsof}"
-  local root dir p pid hits="" lsof_output="" lsof_rc=0
+  local root dir p pid owner hits="" lsof_output="" lsof_rc=0
+  local -a probe_status=()
 
   root="$(multi_root)"
   dir="$root/$name"
 
   if [[ -d "$procdir" && -r "$procdir/self/environ" ]]; then
     for p in "$procdir"/[0-9]*; do
-      if [[ ! -r "$p/environ" ]]; then continue; fi
       pid="${p##*/}"
-      if [[ "$pid" == "$$" ]]; then continue; fi
-      if tr '\0' '\n' < "$p/environ" 2>/dev/null \
-         | grep -qxF "CLAUDE_CONFIG_DIR=$dir"; then
+      if [[ "$pid" == "$$" || ! -d "$p" ]]; then continue; fi
+      if [[ ! -r "$p/environ" ]]; then
+        owner="$(awk -v uid="$EUID" '/^Uid:/ { print ($2 == uid || $3 == uid) ? "own" : "other"; exit }' \
+          "$p/status" 2>/dev/null)" || owner=""
+        if [[ -d "$p" && ( -O "$p" || -z "$owner" || "$owner" == "own" ) ]]; then
+          log "could not determine whether '$name' is in use: unreadable environment for pid $pid"
+          return 2
+        fi
+        continue
+      fi
+      if { tr '\0' '\n' < "$p/environ"; } 2>/dev/null \
+         | grep -xF "CLAUDE_CONFIG_DIR=$dir" >/dev/null; then
         hits="$hits $pid"
+      else
+        probe_status=("${PIPESTATUS[@]}")
+        if [[ -d "$p" ]] && (( probe_status[0] != 0 || probe_status[1] > 1 )); then
+          log "could not determine whether '$name' is in use: environment scan failed for pid $pid"
+          return 2
+        fi
       fi
     done
     if [[ -n "$hits" ]]; then
