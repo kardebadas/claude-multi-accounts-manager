@@ -25,6 +25,7 @@ launch_account() {
   if ! sync_project_memory "$name"; then
     warn "project memory for '$name' could not be synchronized; launching anyway"
   fi
+  _resolve_managed_account_dir "$name" || return 1
 
   log "launching claude in '$name'"
   exec env CLAUDE_CONFIG_DIR="$acct" \

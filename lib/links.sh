@@ -115,6 +115,7 @@ path_has_content() {
 # root or account symlink outside the managed tree.
 _resolve_managed_account_dir() {
   local account="${1:-}" root resolved_root resolved_account
+  local shared source path resolved
   _SAFE_ACCOUNT_DIR=""
 
   if ! validate_name "$account" || [[ "$account" != "$CANONICAL_NAME" ]]; then
@@ -140,6 +141,34 @@ _resolve_managed_account_dir() {
     warn "refusing account mutation outside the managed root: $account"
     return 1
   fi
+  shared="$resolved_root/shared"
+  if [[ -L "$shared" || ! -d "$shared" ]] || \
+     ! resolved="$(readlink -f -- "$shared")" || [[ "$resolved" != "$shared" ]]; then
+    warn "refusing account mutation through an unsafe shared directory: $shared"
+    return 1
+  fi
+  source="$(readlink -m -- "$HOME/.claude")" || return 1
+  for path in "$shared"/* "$shared"/.[!.]* "$shared"/..?*; do
+    if [[ ! -L "$path" ]]; then continue; fi
+    if [[ "${path##*/}" != skills ]] || \
+       ! resolved="$(readlink -e -- "$path")" || [[ ! -d "$resolved" ]] || \
+       _seed_paths_overlap "$resolved" "$source" || \
+       _seed_paths_overlap "$resolved" "$resolved_root"; then
+      warn "refusing unsafe shared-item symlink: $path"
+      return 1
+    fi
+  done
+  # An empty record propagates traversal failure out of the process substitution.
+  while IFS= read -r -d '' path; do
+    if [[ -z "$path" ]] || ! resolved="$(readlink -m -- "$path")"; then
+      warn "cannot establish safe shared symlink targets"
+      return 1
+    fi
+    if _seed_paths_overlap "$resolved" "$source"; then
+      warn "shared symlink overlaps the read-only Claude source: $path"
+      return 1
+    fi
+  done < <(find -L "$shared" -mindepth 2 -xtype l -print0 || printf '\0')
   _SAFE_ACCOUNT_DIR="$resolved_account"
 }
 

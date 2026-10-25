@@ -22,7 +22,7 @@ state remain per account.
 Clone the repository, then run the installer from the clone:
 
 ```bash
-git clone <repository-url> claude-multi-accounts-manager
+git clone https://github.com/kardebadas/claude-multi-accounts-manager.git claude-multi-accounts-manager
 cd claude-multi-accounts-manager
 ./install.sh
 ```

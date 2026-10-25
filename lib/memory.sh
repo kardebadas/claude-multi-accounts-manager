@@ -284,7 +284,7 @@ _memory_sync_paths_safe() {
 # Zero bytes on stdout; unsafe paths are refused without exiting the caller.
 sync_project_memory() {
   local account="${1:?sync_project_memory: account required}"
-  local account_path store path slug link link_status linked=0
+  local account_path store path slug link link_status moved linked=0
   _memory_sync_paths_safe "$account" || return 1
   account_path="$_SAFE_ACCOUNT_DIR"
   store="${account_path%/*}/shared/project-memory"
@@ -302,6 +302,7 @@ sync_project_memory() {
     _memory_sync_paths_safe "$account" "$slug" || return 1
     if [[ -d "$store/$slug" ]]; then continue; fi
     link="$path/memory"
+    moved=0
     if [[ -d "$link" && ! -L "$link" ]]; then
       # Preserve the physical directory without merging competing memories.
       if ! mv -nT -- "$link" "$store/$slug" || \
@@ -309,9 +310,29 @@ sync_project_memory() {
         warn "project-memory: could not enroll existing memory for $account/$slug"
         return 1
       fi
+      moved=1
     elif ! mkdir -- "$store/$slug"; then
       warn "project-memory: could not enroll empty memory for $account/$slug"
       return 1
+    fi
+    if _memory_link_sync_one "$account" "$slug"; then
+      linked=$((linked + 1))
+    else
+      link_status=$?
+      if (( link_status != 1 )); then
+        if (( moved )); then
+          if [[ ! -e "$link" && ! -L "$link" && -d "$store/$slug" && ! -L "$store/$slug" ]] && \
+             [[ "$(readlink -e -- "$path")" == "$path" && \
+                "$(readlink -e -- "$store/$slug")" == "$store/$slug" ]] && \
+             mv -nT -- "$store/$slug" "$link" && \
+             [[ ! -e "$store/$slug" && ! -L "$store/$slug" && -d "$link" && ! -L "$link" ]]; then
+            warn "project-memory: enrollment failed for $account/$slug; restored local memory"
+          else
+            warn "project-memory: enrollment failed for $account/$slug; memory retained at $store/$slug"
+          fi
+        fi
+        return 1
+      fi
     fi
     log "project-memory: enrolled $account/$slug"
   done
@@ -396,8 +417,10 @@ _memory_link_sync_one() {
       backup="$backup.1"
     done
 
-    if ! ln -s "$target" "$link"; then
-      if mv -T "$backup" "$link"; then
+    if ! ln -sT "$target" "$link"; then
+      if [[ "$(readlink -e -- "$parent")" == "$parent" && ! -e "$link" && ! -L "$link" ]] && \
+         mv -nT "$backup" "$link" && \
+         [[ ! -e "$backup" && ! -L "$backup" ]]; then
         warn "project-memory: relink failed for $label; restored existing content"
       else
         warn "project-memory: relink failed for $label; content preserved at ${backup##*/}"
@@ -409,7 +432,7 @@ _memory_link_sync_one() {
     return 0
   fi
 
-  if ! ln -s "$target" "$link"; then
+  if ! ln -sT "$target" "$link"; then
     warn "project-memory: unable to link $label"
     return 2
   fi
