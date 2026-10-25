@@ -158,6 +158,14 @@ _resolve_managed_account_dir() {
       return 1
     fi
   done
+  _SAFE_ACCOUNT_DIR="$resolved_account"
+}
+
+# _shared_symlink_targets_safe <validated-shared-directory>
+# Scan once at the launch boundary, not in the per-slug account resolver.
+_shared_symlink_targets_safe() {
+  local shared="$1" source path resolved
+  source="$(readlink -m -- "$HOME/.claude")" || return 1
   # An empty record propagates traversal failure out of the process substitution.
   while IFS= read -r -d '' path; do
     if [[ -z "$path" ]] || ! resolved="$(readlink -m -- "$path")"; then
@@ -169,7 +177,7 @@ _resolve_managed_account_dir() {
       return 1
     fi
   done < <(find -L "$shared" -mindepth 2 -xtype l -print0 || printf '\0')
-  _SAFE_ACCOUNT_DIR="$resolved_account"
+  return 0
 }
 
 # link_repair <path> <target> <status> [rel|abs]
