@@ -104,12 +104,6 @@ _seed_cleanup_stage() {
   rm -rf -- "$stage"
 }
 
-# Return success when either path is equal to or contains the other.
-_seed_paths_overlap() {
-  local left="${1%/}" right="${2%/}"
-  [[ "$left" == "$right" || "$left" == "$right/"* || "$right" == "$left/"* ]]
-}
-
 seed_shared() (
   local main="${1-}"
   local requested_shared="${2:-$(multi_root)/shared}"
@@ -117,6 +111,7 @@ seed_shared() (
   local publish_target publish_parent publish_base stage_suffix stage_prefix
   local stage_template stage build_shared
 
+  validate_managed_root_source || return 1
   validate_main_folder "$main" || return 1
 
   if [[ "$requested_shared" != /* ]]; then
@@ -133,14 +128,16 @@ seed_shared() (
     return 1
   }
 
+  validate_managed_root_source "$shared" || return 1
+
   # Containment is rejected before the A38 existence guard or any filesystem
   # write. The resolved external skills source is protected as source data too.
   if _seed_paths_overlap "$main_canon" "$shared"; then
     warn "source and shared destination overlap: $main_canon <-> $shared"
     return 1
   fi
-  if [[ -L "$main/skills" ]]; then
-    skills_canon=$(readlink -f "$main/skills" 2>/dev/null || true)
+  if [[ -L "$main_canon/skills" ]]; then
+    skills_canon=$(readlink -f "$main_canon/skills" 2>/dev/null || true)
     if [[ -n "$skills_canon" ]] && _seed_paths_overlap "$skills_canon" "$shared"; then
       warn "resolved skills source and shared destination overlap: $skills_canon <-> $shared"
       return 1
@@ -208,8 +205,8 @@ seed_shared() (
     return 1
   fi
 
-  if [[ -f "$main/CLAUDE.md" ]]; then
-    if ! cp -p "$main/CLAUDE.md" "$build_shared/CLAUDE.md"; then
+  if [[ -f "$main_canon/CLAUDE.md" ]]; then
+    if ! cp -p "$main_canon/CLAUDE.md" "$build_shared/CLAUDE.md"; then
       warn "failed to seed CLAUDE.md"
       return 1
     fi
@@ -220,13 +217,13 @@ seed_shared() (
 
   local d
   for d in "${SEED_COPY_DIRS[@]}"; do
-    if [[ -d "$main/$d" ]]; then
+    if [[ -d "$main_canon/$d" ]]; then
       if ! mkdir -p "$build_shared/$d"; then
         warn "failed to create staged $d/"
         return 1
       fi
       # "$src/." copies the CONTENTS, so a re-run does not nest src inside dst.
-      if ! cp -a "$main/$d/." "$build_shared/$d/"; then
+      if ! cp -a "$main_canon/$d/." "$build_shared/$d/"; then
         warn "failed to seed $d/"
         return 1
       fi
@@ -238,8 +235,8 @@ seed_shared() (
 
   # Verified fact: the real ~/.claude has NO commands/ dir. Created empty above,
   # so an absent source is a no-op instead of a `set -e` abort.
-  if [[ -d "$main/commands" ]]; then
-    if ! cp -a "$main/commands/." "$build_shared/commands/"; then
+  if [[ -d "$main_canon/commands" ]]; then
+    if ! cp -a "$main_canon/commands/." "$build_shared/commands/"; then
       warn "failed to seed commands/"
       return 1
     fi
@@ -248,10 +245,10 @@ seed_shared() (
     log "created commands/ empty (absent in $main)"
   fi
 
-  seed_skills_link "$main" "$build_shared" || return 1
+  seed_skills_link "$main_canon" "$build_shared" || return 1
 
-  if [[ -f "$main/settings.json" ]]; then
-    rewrite_hook_paths "$main/settings.json" "$build_shared/settings.json" "$main" "$shared" || return 1
+  if [[ -f "$main_canon/settings.json" ]]; then
+    rewrite_hook_paths "$main_canon/settings.json" "$build_shared/settings.json" "$main" "$shared" || return 1
     log "seeded settings.json (hook paths rewritten into $shared/hooks)"
   else
     log "skipped settings.json (absent in $main)"
@@ -263,7 +260,8 @@ seed_shared() (
     warn "seed destination appeared before publication: $publish_target"
     return 1
   fi
-  if ! mv -- "$stage" "$publish_target"; then
+  if ! mv -T --no-clobber -- "$stage" "$publish_target" || \
+     [[ -e "$stage" || -L "$stage" || ! -d "$publish_target" || -L "$publish_target" ]]; then
     warn "failed to publish staged seed root: $publish_target"
     return 1
   fi
@@ -279,18 +277,28 @@ seed_shared() (
 # ENVIRON rather than -v, because -v applies backslash-escape processing.
 rewrite_hook_paths() {
   local src="$1" dst="$2" main="$3" shared="$4"
-  local from="${main%/}/hooks/" to="${shared%/}/hooks/"
+  local alias_from="${main%/}/hooks/" from to="${shared%/}/hooks/"
   local tmp="$dst.tmp.$$"
+  main="$(readlink -f -- "$main")" || return 1
+  from="${main%/}/hooks/"
 
-  if ! SEED_FROM="$from" SEED_TO="$to" awk '
-    BEGIN { from = ENVIRON["SEED_FROM"]; to = ENVIRON["SEED_TO"] }
-    {
-      line = $0; out = ""
-      while ((p = index(line, from)) > 0) {
+  if ! SEED_FROM="$from" SEED_ALIAS_FROM="$alias_from" SEED_TO="$to" awk '
+    BEGIN {
+      from = ENVIRON["SEED_FROM"]; alias_from = ENVIRON["SEED_ALIAS_FROM"]
+      to = ENVIRON["SEED_TO"]
+    }
+    function replace(line, prefix, out, p) {
+      out = ""
+      while ((p = index(line, prefix)) > 0) {
         out = out substr(line, 1, p - 1) to
-        line = substr(line, p + length(from))
+        line = substr(line, p + length(prefix))
       }
-      print out line
+      return out line
+    }
+    {
+      line = replace($0, from)
+      if (alias_from != from) line = replace(line, alias_from)
+      print line
     }
   ' "$src" > "$tmp"; then
     rm -f "$tmp"

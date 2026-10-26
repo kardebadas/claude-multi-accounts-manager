@@ -18,6 +18,7 @@ make_menu_fixture() {
   export CLAUDE_MULTI_ROOT="$HOME/.claude-multi"
   export CLAUDE_MULTI_PROC="$MENU_BASE/proc"
   unset CLAUDE_MULTI_NO_UNICODE
+  unset CLAUDE_MULTI_NO_LAUNCH
   case "$CLAUDE_MULTI_ROOT" in
     ""|"/"|"$REAL_HOME"|"$REAL_HOME/.claude-multi"|"$REAL_HOME/.claude")
       printf 'FATAL: unsafe menu fixture root: %s\n' "$CLAUDE_MULTI_ROOT" >&2
@@ -309,6 +310,21 @@ t_menu_number_tolerates_surrounding_whitespace() {
     "a padded selection leaves stdout byte-empty"
 }
 
+t_menu_number_preserves_leading_zero_selection() {
+  make_menu_fixture
+  mk_menu_account personal credentials
+  export LC_ALL=C
+  local record="$MENU_BASE/leading-zero"
+  local out="$MENU_BASE/leading-zero.out" err="$MENU_BASE/leading-zero.err"
+  local rc
+  rc="$(menu_drive $'0001\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "a leading-zero selection launches successfully"
+  assert_eq "[personal]" "$(recorded_launch_args "$record")" \
+    "leading zeroes do not change the selected account"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+}
+
 t_menu_q_quits_without_launching_or_writing_stdout() {
   make_menu_fixture
   mk_menu_account personal credentials
@@ -332,7 +348,7 @@ t_menu_invalid_choices_warn_redraw_then_allow_a_valid_selection() {
   export LC_ALL=C
   local record="$MENU_BASE/invalid"
   local out="$MENU_BASE/invalid.out" err="$MENU_BASE/invalid.err" rc
-  rc="$(menu_drive $'zz\n0\n99\n-1\n1\n' "$record" "$out" "$err")"
+  rc="$(menu_drive $'zz\n0\n99\n-1\n18446744073709551617\n1\n' "$record" "$out" "$err")"
 
   assert_eq "0" "$rc" "the menu recovers and launches after invalid choices"
   assert_contains "$(cat "$err")" "invalid selection: 'zz'" \
@@ -343,7 +359,9 @@ t_menu_invalid_choices_warn_redraw_then_allow_a_valid_selection() {
     "a number above the list is rejected"
   assert_contains "$(cat "$err")" "invalid selection: '-1'" \
     "a negative choice is rejected before arithmetic"
-  assert_eq "5" "$(grep -c 'Claude accounts' "$err")" \
+  assert_contains "$(cat "$err")" "invalid selection: '18446744073709551617'" \
+    "an oversized decimal cannot wrap into row one"
+  assert_eq "6" "$(grep -c 'Claude accounts' "$err")" \
     "the menu redraws after each rejected choice and before the accepted one"
   assert_eq "[personal]" "$(recorded_launch_args "$record")" \
     "invalid choices never change the later valid delegation"
@@ -433,23 +451,71 @@ t_menu_zero_accounts_rejects_number_without_array_underflow() {
     "empty-list rejection and quit leave stdout byte-empty"
 }
 
-t_menu_add_prompts_and_delegates_to_real_account_creation() {
+t_menu_add_default_yes_launches_the_canonical_account() {
   make_menu_fixture
   export LC_ALL=C
   local record="$MENU_BASE/add"
   local out="$MENU_BASE/add.out" err="$MENU_BASE/add.err" rc
-  rc="$(menu_drive $'a\nnewbox\nq\n' "$record" "$out" "$err")"
+  rc="$(menu_drive $'a\nNewBox\n\n' "$record" "$out" "$err")"
 
-  assert_eq "0" "$rc" "the add action returns to the menu for quit"
+  assert_eq "0" "$rc" "the default post-add answer launches successfully"
   assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/newbox" ]]; then printf yes; else printf no; fi)" \
-    "add creates the requested account through add_account"
+    "add creates the canonicalized account through add_account"
   assert_link "$CLAUDE_MULTI_ROOT/newbox/CLAUDE.md" "../shared/CLAUDE.md"
   assert_contains "$(cat "$err")" "New account name >" \
     "the add action prompts for the account name on stderr"
-  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
-    "adding an account never triggers an accidental launch"
+  assert_contains "$(cat "$err")" "launch claude in 'newbox' now to log in? [Y/n]" \
+    "a successful add offers the canonical account for launch"
+  assert_eq "[newbox]" "$(recorded_launch_args "$record")" \
+    "the default answer delegates the canonical name to launch_account"
   assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
     "the add workflow leaves stdout byte-empty"
+}
+
+t_menu_add_explicit_decline_returns_without_launching() {
+  make_menu_fixture
+  export LC_ALL=C
+  local record="$MENU_BASE/add-decline"
+  local out="$MENU_BASE/add-decline.out" err="$MENU_BASE/add-decline.err" rc
+  rc="$(menu_drive $'a\nnewbox\nn\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "declining launch returns to the menu for quit"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/newbox" ]]; then printf yes; else printf no; fi)"
+  assert_contains "$(cat "$err")" "[Y/n]"
+  assert_contains "$(cat "$err")" "not launching; run: claude-multi newbox"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+}
+
+t_menu_add_launch_offer_eof_declines_and_exits_cleanly() {
+  make_menu_fixture
+  export LC_ALL=C
+  local record="$MENU_BASE/add-eof"
+  local out="$MENU_BASE/add-eof.out" err="$MENU_BASE/add-eof.err" rc
+  rc="$(menu_drive $'a\nnewbox\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "EOF at the launch offer declines and the exhausted menu exits"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/newbox" ]]; then printf yes; else printf no; fi)"
+  assert_contains "$(cat "$err")" "no answer; not launching"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
+}
+
+t_menu_add_launch_offer_can_be_suppressed() {
+  make_menu_fixture
+  export LC_ALL=C
+  export CLAUDE_MULTI_NO_LAUNCH=1
+  local record="$MENU_BASE/add-suppressed"
+  local out="$MENU_BASE/add-suppressed.out" err="$MENU_BASE/add-suppressed.err" rc
+  rc="$(menu_drive $'a\nnewbox\nq\n' "$record" "$out" "$err")"
+
+  assert_eq "0" "$rc" "suppressed launch returns to the menu for quit"
+  assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/newbox" ]]; then printf yes; else printf no; fi)"
+  assert_eq "" "$(grep -F '[Y/n]' "$err" || true)" \
+    "CLAUDE_MULTI_NO_LAUNCH must suppress the prompt itself"
+  assert_contains "$(cat "$err")" "not launching; run: claude-multi newbox"
+  assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')"
 }
 
 t_menu_add_rejects_reserved_name_without_touching_shared() {
@@ -467,6 +533,8 @@ t_menu_add_rejects_reserved_name_without_touching_shared() {
     "the reserved name never becomes an account"
   assert_contains "$(cat "$err")" "reserved" \
     "the owning account validator reports the rejection on stderr"
+  assert_eq "" "$(grep -F '[Y/n]' "$err" || true)" \
+    "failed account creation must not offer a launch"
   assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
     "a rejected add never triggers a launch"
   assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
@@ -520,15 +588,15 @@ t_menu_delete_invalid_number_refuses_without_deleting() {
   mk_menu_account keepme credentials
   local record="$MENU_BASE/delete-invalid"
   local out="$MENU_BASE/delete-invalid.out" err="$MENU_BASE/delete-invalid.err" rc
-  rc="$(menu_drive $'d\n7\nq\n' "$record" "$out" "$err")"
+  rc="$(menu_drive $'d\n18446744073709551617\nq\n' "$record" "$out" "$err")"
 
   assert_eq "0" "$rc" "an invalid delete choice returns to the menu"
   assert_eq "yes" "$(if [[ -d "$CLAUDE_MULTI_ROOT/keepme" ]]; then printf yes; else printf no; fi)" \
     "an out-of-range delete selection removes nothing"
   assert_contains "$(cat "$err")" "Delete which number? >" \
     "the delete action owns a distinct numbered-account prompt"
-  assert_contains "$(cat "$err")" "invalid selection: '7'" \
-    "the invalid delete number is reported on stderr"
+  assert_contains "$(cat "$err")" "invalid selection: '18446744073709551617'" \
+    "the oversized delete number is rejected without arithmetic wraparound"
   assert_eq "no" "$(if [[ -e "$record.argv" ]]; then printf yes; else printf no; fi)" \
     "an invalid delete selection never launches"
   assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
@@ -559,6 +627,36 @@ t_menu_sync_and_doctor_process_every_stable_account() {
     "sync and doctor never trigger a launch"
   assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
     "sync and doctor leave stdout byte-empty"
+}
+
+t_menu_sync_ignores_symlinked_account_and_preserves_external_target() {
+  make_menu_fixture
+  export LC_ALL=C
+  local external="$MENU_BASE/external-account"
+  mkdir -p "$external/projects/private"
+  printf 'external settings bytes\n' > "$external/settings.json"
+  printf 'external project bytes\n' > "$external/projects/private/history.jsonl"
+  ln -s "$external" "$CLAUDE_MULTI_ROOT/escape"
+  local record="$MENU_BASE/sync-external"
+  local out="$MENU_BASE/sync-external.out" err="$MENU_BASE/sync-external.err" rc
+
+  rc="$(menu_drive $'s\nq\n' "$record" "$out" "$err")"
+  menu_do_sync escape >>"$out" 2>>"$err"
+
+  assert_eq "0" "$rc" "sync returns to the menu after ignoring unsafe entries"
+  assert_eq "external settings bytes" "$(cat "$external/settings.json")" \
+            "menu sync leaves an external settings file byte-for-byte unchanged"
+  assert_eq "external project bytes" \
+            "$(cat "$external/projects/private/history.jsonl")" \
+            "menu sync leaves external project data byte-for-byte unchanged"
+  assert_eq "" "$(find "$external" \( -name '*.bak.*' -o -type l \) -print)" \
+            "menu sync creates no backup or shared link in the external target"
+  assert_eq "" "$(list_accounts)" \
+            "a symlinked directory is not exposed as an account"
+  assert_contains "$(cat "$err")" "unsafe account target refused" \
+    "the mutating sync entry point independently validates canonical containment"
+  assert_eq "0" "$(wc -c < "$out" | tr -d '[:space:]')" \
+            "the guarded sync path remains stdout-clean"
 }
 
 t_menu_doctor_is_report_only_and_returns_after_failure() {

@@ -289,3 +289,25 @@ validate_name() {
   CANONICAL_NAME="$name"
   return 0
 }
+
+# Return success when either path is equal to or contains the other.
+_seed_paths_overlap() {
+  local left="${1%/}" right="${2%/}"
+  [[ "$left" == "$right" || "$left" == "$right/"* || "$right" == "$left/"* ]]
+}
+
+# Refuse managed destinations that can write into the read-only Claude source.
+validate_managed_root_source() {
+  local root="${1:-$(multi_root)}" resolved source
+  validate_root_path "$root" || return 1
+  if ! resolved="$(readlink -m -- "$root")" || \
+     ! source="$(readlink -m -- "$HOME/.claude")"; then
+    warn "cannot resolve managed root or read-only Claude source"
+    return 1
+  fi
+  if _seed_paths_overlap "$resolved" "$source"; then
+    warn "managed root overlaps the read-only Claude source: $root"
+    return 1
+  fi
+  return 0
+}

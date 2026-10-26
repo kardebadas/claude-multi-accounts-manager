@@ -108,6 +108,78 @@ path_has_content() {
   [[ -s "$path" ]]
 }
 
+# _resolve_managed_account_dir <account>
+# Validate a mutating heal/sync target independently of its caller and expose
+# its canonical path through _SAFE_ACCOUNT_DIR. Account enumeration and launch
+# have their own guards; this one prevents direct heal calls from following a
+# root or account symlink outside the managed tree.
+_resolve_managed_account_dir() {
+  local account="${1:-}" root resolved_root resolved_account
+  local shared source path resolved
+  _SAFE_ACCOUNT_DIR=""
+
+  if ! validate_name "$account" || [[ "$account" != "$CANONICAL_NAME" ]]; then
+    warn "refusing account mutation for invalid account name: $account"
+    return 1
+  fi
+  root="$(multi_root)"
+  if ! validate_managed_root_source "$root" || [[ -L "$root" || ! -d "$root" ]]; then
+    warn "refusing account mutation through an unsafe managed root: $root"
+    return 1
+  fi
+  if ! resolved_root="$(readlink -f -- "$root" 2>/dev/null)" || \
+     [[ -z "$resolved_root" ]]; then
+    warn "refusing account mutation because the managed root cannot be resolved"
+    return 1
+  fi
+  if [[ -L "$root/$account" || ! -d "$root/$account" ]]; then
+    warn "refusing account mutation for a non-directory or symlinked account: $account"
+    return 1
+  fi
+  if ! resolved_account="$(readlink -f -- "$root/$account" 2>/dev/null)" || \
+     [[ -z "$resolved_account" || "$resolved_account" != "$resolved_root/$account" ]]; then
+    warn "refusing account mutation outside the managed root: $account"
+    return 1
+  fi
+  shared="$resolved_root/shared"
+  if [[ -L "$shared" || ! -d "$shared" ]] || \
+     ! resolved="$(readlink -f -- "$shared")" || [[ "$resolved" != "$shared" ]]; then
+    warn "refusing account mutation through an unsafe shared directory: $shared"
+    return 1
+  fi
+  source="$(readlink -m -- "$HOME/.claude")" || return 1
+  for path in "$shared"/* "$shared"/.[!.]* "$shared"/..?*; do
+    if [[ ! -L "$path" ]]; then continue; fi
+    if [[ "${path##*/}" != skills ]] || \
+       ! resolved="$(readlink -e -- "$path")" || [[ ! -d "$resolved" ]] || \
+       _seed_paths_overlap "$resolved" "$source" || \
+       _seed_paths_overlap "$resolved" "$resolved_root"; then
+      warn "refusing unsafe shared-item symlink: $path"
+      return 1
+    fi
+  done
+  _SAFE_ACCOUNT_DIR="$resolved_account"
+}
+
+# _shared_symlink_targets_safe <validated-shared-directory>
+# Scan once at the launch boundary, not in the per-slug account resolver.
+_shared_symlink_targets_safe() {
+  local shared="$1" source path resolved
+  source="$(readlink -m -- "$HOME/.claude")" || return 1
+  # An empty record propagates traversal failure out of the process substitution.
+  while IFS= read -r -d '' path; do
+    if [[ -z "$path" ]] || ! resolved="$(readlink -m -- "$path")"; then
+      warn "cannot establish safe shared symlink targets"
+      return 1
+    fi
+    if _seed_paths_overlap "$resolved" "$source"; then
+      warn "shared symlink overlaps the read-only Claude source: $path"
+      return 1
+    fi
+  done < <(find -L "$shared" -mindepth 2 -xtype l -print0 || printf '\0')
+  return 0
+}
+
 # link_repair <path> <target> <status> [rel|abs]
 # FLOW. Acts on a status word from link_verify. 0 = the path is now correct,
 # 1 = it cannot be repaired here. Narration to stderr only; never exits.
@@ -130,7 +202,20 @@ link_repair() {
       if path_has_content "$path"; then
         stamp="$(date -u +%Y%m%dT%H%M%SZ)"
         backup="$path.bak.$stamp"
-        mv "$path" "$backup" || { warn "cannot back up $path — leaving it in place"; return 1; }
+        while :; do
+          while [[ -e "$backup" || -L "$backup" ]]; do
+            backup="$backup.1"
+          done
+          if ! mv -nT -- "$path" "$backup"; then
+            warn "cannot back up $path — leaving it in place"
+            return 1
+          fi
+          if [[ ! -e "$path" && ! -L "$path" && \
+                ( -e "$backup" || -L "$backup" ) ]]; then
+            break
+          fi
+          backup="$backup.1"
+        done
         warn "backed up real path before relinking: $path -> $backup"
       elif [[ -d "$path" ]]; then
         rmdir "$path"          # only ever succeeds on an empty directory
@@ -164,6 +249,9 @@ link_repair() {
 # the call site that breaks silently if anyone redirects it to stderr.
 heal_account() {
   local account="$1" path target status rc=0
+  if ! _resolve_managed_account_dir "$account"; then
+    return 1
+  fi
   while IFS=$'\t' read -r path target; do
     status="$(link_verify "$path" "$target")"
     if [[ "$status" == "ok" ]]; then

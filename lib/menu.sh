@@ -109,6 +109,27 @@ menu_trim() {
   printf '%s' "$value"
 }
 
+# menu_parse_index <decimal> <maximum> — validate before any arithmetic.
+# The normalized result is returned through MENU_INDEX so stdout stays unused.
+menu_parse_index() {
+  local value="${1-}" maximum="${2-}"
+  MENU_INDEX=""
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  while [[ ${#value} -gt 1 && "${value:0:1}" == "0" ]]; do
+    value="${value:1}"
+  done
+  if [[ "$value" == "0" || ${#value} -gt ${#maximum} ]]; then
+    return 1
+  fi
+  if [[ ${#value} -eq ${#maximum} ]] && (( 10#$value > maximum )); then
+    return 1
+  fi
+  MENU_INDEX=$((10#$value))
+  return 0
+}
+
 # menu_accounts — fill the caller's names array in list_accounts order.
 menu_accounts() {
   local line
@@ -144,11 +165,9 @@ menu_loop() {
       x|X) menu_do_doctor ${names[@]+"${names[@]}"}; continue ;;
     esac
 
-    if [[ "$selection" =~ ^[0-9]+$ ]]; then
-      index=$((10#$selection))
-      if (( index >= 1 && index <= ${#names[@]} )); then
-        launch_account "${names[$((index - 1))]}"
-      fi
+    if menu_parse_index "$selection" "${#names[@]}"; then
+      index="$MENU_INDEX"
+      launch_account "${names[$((index - 1))]}"
     fi
 
     warn "invalid selection: '$selection'"
@@ -173,12 +192,10 @@ menu_pick() {
   fi
   selection="$(menu_trim "$selection")"
 
-  if [[ "$selection" =~ ^[0-9]+$ ]]; then
-    index=$((10#$selection))
-    if (( index >= 1 && index <= ${#names[@]} )); then
-      printf '%s' "${names[$((index - 1))]}"
-      return 0
-    fi
+  if menu_parse_index "$selection" "${#names[@]}"; then
+    index="$MENU_INDEX"
+    printf '%s' "${names[$((index - 1))]}"
+    return 0
   fi
 
   warn "invalid selection: '$selection'"
@@ -199,7 +216,14 @@ menu_do_add() {
     warn "cancelled"
     return 0
   fi
-  add_account "$name" || warn "add failed"
+  if ! add_account "$name"; then
+    warn "add failed"
+    return 0
+  fi
+  name="$CANONICAL_NAME"
+  if offer_launch "$name"; then
+    launch_account "$name" || warn "launch failed"
+  fi
   return 0
 }
 
@@ -220,6 +244,10 @@ menu_do_sync() {
   fi
   for name in "$@"; do
     warn "sync: $name"
+    if ! _resolve_managed_account_dir "$name"; then
+      warn "sync: $name: unsafe account target refused"
+      continue
+    fi
     heal_account "$name" || warn "sync: $name: link repair failed"
     sync_project_memory "$name" || warn "sync: $name: memory sync failed"
   done
@@ -237,3 +265,144 @@ menu_do_doctor() {
   done
   return 0
 }
+
+# first_run_wizard — seed one complete managed root from a read-only source.
+# The live root appears only through the final same-filesystem rename. No
+# account is created; the caller enters the empty menu after success.
+first_run_wizard() (
+  local root root_canon default answer main main_canon
+  local publish_target publish_parent publish_base stage_suffix stage_prefix
+  local stage_template stage build_root
+
+  root="$(multi_root)"
+  validate_managed_root_source "$root" || return 1
+  root_canon="$(readlink -m -- "$root")" || {
+    warn "first run: cannot resolve managed root: $root"
+    return 1
+  }
+  default="$HOME/.claude"
+  menu_glyphs
+
+  if [[ -e "$root/shared" || -L "$root/shared" || \
+        -e "$root_canon/shared" || -L "$root_canon/shared" ]]; then
+    warn "first run: $root/shared already exists — refusing to re-seed"
+    return 1
+  fi
+
+  {
+    printf '\n'
+    printf '  First run. claude-multi copies the shareable parts of your main\n'
+    printf '  Claude folder into %s/shared and never writes to the source.\n' \
+      "$(home_relative "$root")"
+    printf '\n'
+  } >&2
+
+  while :; do
+    printf '  Main Claude folder [%s] %s ' \
+      "$(home_relative "$default")" "$G_ARROW" >&2
+    if ! IFS= read -r answer; then
+      printf '\n' >&2
+      warn "first run: no answer (end of input) — nothing was seeded"
+      return 1
+    fi
+    answer="$(menu_trim "$answer")"
+
+    if [[ -z "$answer" ]]; then
+      main="$default"
+    else
+      case "$answer" in
+        '~') main="$HOME" ;;
+        '~/'*) main="$HOME/${answer#'~/'}" ;;
+        *) main="$answer" ;;
+      esac
+    fi
+
+    if validate_main_folder "$main"; then
+      break
+    fi
+  done
+
+  main_canon="$(readlink -f -- "$main")" || {
+    warn "first run: cannot resolve main folder: $main"
+    return 1
+  }
+  if _seed_paths_overlap "$main_canon" "$root_canon"; then
+    warn "first run: source and managed root overlap: $main_canon <-> $root_canon"
+    return 1
+  fi
+  if [[ -e "$root" || -L "$root" || -e "$root_canon" || -L "$root_canon" ]]; then
+    warn "first run: managed root already exists — refusing to re-seed: $root_canon"
+    return 1
+  fi
+
+  publish_target="$root_canon"
+  stage_suffix=""
+  while :; do
+    publish_parent="$(dirname -- "$publish_target")" || return 1
+    if [[ -d "$publish_parent" ]]; then
+      break
+    fi
+    if [[ -e "$publish_parent" || -L "$publish_parent" ]]; then
+      warn "first run: managed-root parent is not a directory: $publish_parent"
+      return 1
+    fi
+    stage_suffix="/${publish_target##*/}$stage_suffix"
+    publish_target="$publish_parent"
+  done
+
+  publish_base="${publish_target##*/}"
+  stage_prefix=".$publish_base.first-run."
+  if [[ "$publish_parent" == "/" ]]; then
+    stage_template="/$stage_prefix"'XXXXXXXX'
+  else
+    stage_template="$publish_parent/$stage_prefix"'XXXXXXXX'
+  fi
+  if ! stage="$(mktemp -d "$stage_template")"; then
+    warn "first run: cannot create staging directory beside $publish_target"
+    return 1
+  fi
+  if ! _seed_stage_is_valid "$stage" "$publish_parent" "$stage_prefix"; then
+    rmdir -- "$stage" 2>/dev/null || true
+    warn "first run: created staging directory failed validation: $stage"
+    return 1
+  fi
+  trap 'first_run_status=$?; trap - EXIT INT TERM; _seed_cleanup_stage "$stage" "$publish_parent" "$stage_prefix" || :; exit "$first_run_status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  build_root="$stage$stage_suffix"
+  if ! mkdir -p "$build_root"; then
+    warn "first run: cannot create staged managed root: $build_root"
+    return 1
+  fi
+  if ! seed_shared "$main" "$build_root/shared"; then
+    warn "first run: shared seeding failed — nothing was published"
+    return 1
+  fi
+  if [[ -f "$main_canon/settings.json" ]] && \
+     ! rewrite_hook_paths "$main_canon/settings.json" \
+       "$build_root/shared/settings.json" "$main" "$root_canon/shared"; then
+    warn "first run: final settings rewrite failed — nothing was published"
+    return 1
+  fi
+  if ! CLAUDE_MULTI_ROOT="$build_root" seed_project_memory "$main_canon"; then
+    warn "first run: project-memory seeding failed — nothing was published"
+    return 1
+  fi
+
+  if [[ -e "$publish_target" || -L "$publish_target" ]]; then
+    warn "first run: destination appeared before publication: $publish_target"
+    return 1
+  fi
+  if ! mv -T --no-clobber -- "$stage" "$publish_target" || \
+     [[ -e "$stage" || -L "$stage" || ! -d "$publish_target" || -L "$publish_target" ]]; then
+    warn "first run: failed to publish staged managed root: $publish_target"
+    return 1
+  fi
+  stage=""
+  trap - EXIT INT TERM
+
+  log "first run: seeded $(home_relative "$root")/shared from $(home_relative "$main")"
+  log "no account was created — press a) in the menu to add one"
+  return 0
+)

@@ -5,6 +5,8 @@
 # below emit data on stdout only from data producers. Reconstruction validates
 # candidates against directories on disk; worktree filtering uses that decoded
 # path so lossy slug punctuation cannot create false positives.
+# Mutating account sync consumes links.sh's _resolve_managed_account_dir so its
+# canonical name, root, and containment policy stays identical to link healing.
 
 # slug_of_path <abs_path> -> slug
 slug_of_path() {
@@ -189,8 +191,12 @@ memory_link_target() {
 seed_project_memory() {
   local main="${1:?seed_project_memory: main folder required}"
   local dest src slug seeded=0
+  local -a seeded_slugs=()
   dest="$(project_memory_store)"
-  mkdir -p "$dest"
+  if ! mkdir -p "$dest"; then
+    warn "project-memory: cannot create destination: $dest"
+    return 1
+  fi
 
   while IFS= read -r slug; do
     if [[ -z $slug ]]; then
@@ -206,13 +212,22 @@ seed_project_memory() {
     if ! slug_is_eligible "$slug"; then
       continue
     fi
-    mkdir -p "$dest/$slug"
-    cp -a "$src/." "$dest/$slug/"
-    log "project-memory: seeded $slug"
+    if ! mkdir -p "$dest/$slug"; then
+      warn "project-memory: cannot create destination for $slug"
+      return 1
+    fi
+    if ! cp -a "$src/." "$dest/$slug/"; then
+      warn "project-memory: failed to copy $slug"
+      return 1
+    fi
+    seeded_slugs+=("$slug")
     seeded=$((seeded + 1))
   done < <(project_slugs "$main")
 
   if (( seeded > 0 )); then
+    for slug in ${seeded_slugs[@]+"${seeded_slugs[@]}"}; do
+      log "project-memory: seeded $slug"
+    done
     log "project-memory: seeded $seeded project memory folder(s)"
   fi
   return 0
@@ -234,25 +249,98 @@ store_slugs() {
   done
 }
 
-# sync_project_memory <account>
-# Create each account project-memory link from the active shared store.
-# Zero bytes on stdout; missing accounts are refused without exiting the caller.
-sync_project_memory() {
-  local account="${1:?sync_project_memory: account required}"
-  local account_path slug link target link_status linked=0
-  account_path="$(account_dir "$account")"
-  if [[ ! -d "$account_path" ]]; then
-    warn "sync_project_memory: no such account: $account"
+# Validate every directory component before memory sync follows or creates it.
+_memory_sync_paths_safe() {
+  local account="$1" slug="${2:-}" root path resolved
+  _resolve_managed_account_dir "$account" || return 1
+  root="${_SAFE_ACCOUNT_DIR%/*}"
+  if [[ ! -d "$root/shared" ]]; then
+    warn "project-memory: shared directory is missing"
     return 1
   fi
-
-  while IFS= read -r slug; do
-    if [[ -z $slug ]]; then
-      continue
+  local -a paths=("$root/shared" "$root/shared/project-memory" "$_SAFE_ACCOUNT_DIR/projects")
+  if [[ -n "$slug" ]]; then
+    if [[ "$slug" == */* || "$slug" == . || "$slug" == .. ]]; then
+      warn "project-memory: invalid project slug"
+      return 1
     fi
-    link="$(memory_link_path "$account" "$slug")"
-    target="$(memory_link_target "$slug")"
-    if _memory_link_sync_one "$link" "$target" "$account/$slug"; then
+    paths+=("$_SAFE_ACCOUNT_DIR/projects/$slug" "$root/shared/project-memory/$slug")
+  fi
+  for path in "${paths[@]}"; do
+    if [[ -L "$path" || ( -e "$path" && ! -d "$path" ) ]]; then
+      warn "project-memory: refusing non-directory or symlinked path: $path"
+      return 1
+    fi
+    if ! resolved="$(readlink -m -- "$path")" || [[ "$resolved" != "$path" ]]; then
+      warn "project-memory: path escapes its managed directory: $path"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# sync_project_memory <account>
+# Enroll eligible account projects, then repair links to the shared store.
+# Zero bytes on stdout; unsafe paths are refused without exiting the caller.
+sync_project_memory() {
+  local account="${1:?sync_project_memory: account required}"
+  local account_path store path slug link link_status moved linked=0
+  _memory_sync_paths_safe "$account" || return 1
+  account_path="$_SAFE_ACCOUNT_DIR"
+  store="${account_path%/*}/shared/project-memory"
+  if ! mkdir -p -- "$store"; then
+    warn "project-memory: cannot create shared store"
+    return 1
+  fi
+  _memory_sync_paths_safe "$account" || return 1
+
+  for path in "$account_path/projects"/*; do
+    if [[ ! -e "$path" && ! -L "$path" ]]; then continue; fi
+    slug="${path##*/}"
+    _memory_sync_paths_safe "$account" "$slug" || return 1
+    if [[ -d "$store/$slug" ]] || ! slug_is_eligible "$slug"; then continue; fi
+    _memory_sync_paths_safe "$account" "$slug" || return 1
+    if [[ -d "$store/$slug" ]]; then continue; fi
+    link="$path/memory"
+    moved=0
+    if [[ -d "$link" && ! -L "$link" ]]; then
+      # Preserve the physical directory without merging competing memories.
+      if ! mv -nT -- "$link" "$store/$slug" || \
+         [[ -e "$link" || -L "$link" || ! -d "$store/$slug" || -L "$store/$slug" ]]; then
+        warn "project-memory: could not enroll existing memory for $account/$slug"
+        return 1
+      fi
+      moved=1
+    elif ! mkdir -- "$store/$slug"; then
+      warn "project-memory: could not enroll empty memory for $account/$slug"
+      return 1
+    fi
+    if _memory_link_sync_one "$account" "$slug"; then
+      linked=$((linked + 1))
+    else
+      link_status=$?
+      if (( link_status != 1 )); then
+        if (( moved )); then
+          if [[ ! -e "$link" && ! -L "$link" && -d "$store/$slug" && ! -L "$store/$slug" ]] && \
+             [[ "$(readlink -e -- "$path")" == "$path" && \
+                "$(readlink -e -- "$store/$slug")" == "$store/$slug" ]] && \
+             mv -nT -- "$store/$slug" "$link" && \
+             [[ ! -e "$store/$slug" && ! -L "$store/$slug" && -d "$link" && ! -L "$link" ]]; then
+            warn "project-memory: enrollment failed for $account/$slug; restored local memory"
+          else
+            warn "project-memory: enrollment failed for $account/$slug; memory retained at $store/$slug"
+          fi
+        fi
+        return 1
+      fi
+    fi
+    log "project-memory: enrolled $account/$slug"
+  done
+
+  for path in "$store"/*; do
+    if [[ ! -e "$path" && ! -L "$path" ]]; then continue; fi
+    slug="${path##*/}"
+    if _memory_link_sync_one "$account" "$slug"; then
       linked=$((linked + 1))
     else
       link_status=$?
@@ -261,7 +349,7 @@ sync_project_memory() {
         return 1
       fi
     fi
-  done < <(store_slugs)
+  done
 
   if (( linked > 0 )); then
     log "project-memory: $account — $linked link(s) created or repaired"
@@ -269,19 +357,23 @@ sync_project_memory() {
   return 0
 }
 
-# _memory_link_sync_one <link> <target> <label>
+# _memory_link_sync_one <account> <slug>
 # 0 = created or repaired (and narrated), 1 = already correct (silent),
 # 2 = refused because a safe, lossless repair could not be established.
 # Zero bytes on stdout in every branch.
 _memory_link_sync_one() {
-  local link="$1" target="$2" label="$3"
+  local account="$1" slug="$2" label="$1/$2" link target
   local parent target_path old_target replacement backup
-  parent="$(dirname "$link")"
+  _memory_sync_paths_safe "$account" "$slug" || return 2
+  parent="$_SAFE_ACCOUNT_DIR/projects/$slug"
+  link="$parent/memory"
+  target="$(memory_link_target "$slug")"
   if ! mkdir -p "$parent"; then
     warn "project-memory: unable to prepare link directory for $label"
     return 2
   fi
-  target_path="$parent/$target"
+  _memory_sync_paths_safe "$account" "$slug" || return 2
+  target_path="${_SAFE_ACCOUNT_DIR%/*}/shared/project-memory/$slug"
   if [[ ! -d "$target_path" ]]; then
     warn "project-memory: store target is not an existing directory for $label"
     return 2
@@ -325,8 +417,10 @@ _memory_link_sync_one() {
       backup="$backup.1"
     done
 
-    if ! ln -s "$target" "$link"; then
-      if mv -T "$backup" "$link"; then
+    if ! ln -sT "$target" "$link"; then
+      if [[ "$(readlink -e -- "$parent")" == "$parent" && ! -e "$link" && ! -L "$link" ]] && \
+         mv -nT "$backup" "$link" && \
+         [[ ! -e "$backup" && ! -L "$backup" ]]; then
         warn "project-memory: relink failed for $label; restored existing content"
       else
         warn "project-memory: relink failed for $label; content preserved at ${backup##*/}"
@@ -338,7 +432,7 @@ _memory_link_sync_one() {
     return 0
   fi
 
-  if ! ln -s "$target" "$link"; then
+  if ! ln -sT "$target" "$link"; then
     warn "project-memory: unable to link $label"
     return 2
   fi
