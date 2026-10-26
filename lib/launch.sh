@@ -5,42 +5,36 @@
 # Safe repair failures may leave local memory intact; redirected private state
 # and unexpected memory links must never reach Claude.
 _account_launch_paths_safe() {
-  local account="$1" acct projects path target resolved slug store
+  local account="$1" acct path relative target actual resolved slug store
   _resolve_managed_account_dir "$account" || return 1
   acct="$_SAFE_ACCOUNT_DIR"
-  for path in "$acct"/* "$acct"/.[!.]* "$acct"/..?*; do
-    if [[ ! -L "$path" ]]; then continue; fi
-    if ! target="$(account_link_target "${path##*/}")" || \
-       [[ "$(readlink -- "$path")" != "$target" ]]; then
-      warn "refusing launch through an unexpected account symlink: $path"
+  # Do not follow allowed shared links; their tree is checked separately once.
+  while IFS= read -r -d '' path; do
+    if [[ -z "$path" ]] || ! IFS= read -r -d '' actual < <(readlink -z -- "$path"); then
+      warn "cannot establish safe account symlink targets"
       return 1
     fi
-  done
-
-  projects="$acct/projects"
-  if ! resolved="$(readlink -m -- "$projects")" || [[ "$resolved" != "$projects" ]]; then
-    warn "refusing launch through an unsafe projects path: $projects"
+    relative="${path#"$acct"/}"
+    if [[ "$relative" != */* ]] && \
+       target="$(account_link_target "$relative")" && [[ "$actual" == "$target" ]]; then
+      continue
+    fi
+    if [[ "$relative" == projects/*/memory ]]; then
+      slug="${relative#projects/}"
+      slug="${slug%/memory}"
+      if [[ -n "$slug" && "$slug" != */* ]]; then
+        target="$(memory_link_target "$slug")"
+        store="${acct%/*}/shared/project-memory/$slug"
+        if [[ "$actual" == "$target" ]] && \
+           _memory_sync_paths_safe "$account" "$slug" && [[ -d "$store" ]] && \
+           resolved="$(readlink -e -- "$path")" && [[ "$resolved" == "$store" ]]; then
+          continue
+        fi
+      fi
+    fi
+    warn "refusing launch through an unexpected account symlink: $path"
     return 1
-  fi
-  if [[ ! -d "$projects" ]]; then return 0; fi
-  for path in "$projects"/* "$projects"/.[!.]* "$projects"/..?*; do
-    if [[ ! -e "$path" && ! -L "$path" ]]; then continue; fi
-    if [[ -L "$path" ]] || ! resolved="$(readlink -m -- "$path")" || \
-       [[ "$resolved" != "$path" ]]; then
-      warn "refusing launch through an unsafe project directory: $path"
-      return 1
-    fi
-    if [[ ! -d "$path" || ! -L "$path/memory" ]]; then continue; fi
-    slug="${path##*/}"
-    target="$(memory_link_target "$slug")"
-    store="${acct%/*}/shared/project-memory/$slug"
-    if [[ "$(readlink -- "$path/memory")" != "$target" ]] || \
-       ! _memory_sync_paths_safe "$account" "$slug" || [[ ! -d "$store" ]] || \
-       ! resolved="$(readlink -e -- "$path/memory")" || [[ "$resolved" != "$store" ]]; then
-      warn "refusing launch through an unsafe project memory link: $path/memory"
-      return 1
-    fi
-  done
+  done < <(find -P "$acct" -type l -print0 || printf '\0')
   return 0
 }
 
